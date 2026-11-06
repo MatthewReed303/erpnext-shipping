@@ -523,3 +523,8 @@ class TestStarshipit(IntegrationTestCase):
 		signature = hmac.new(b"s3cret", body, hashlib.sha256).hexdigest()
 		self.webhook_request(body, headers={"X-Starshipit-Signature": signature})
 		self.assertEqual(webhook(), {"ok": True, "matched": False})
+
+	def test_parcel_weight_keeps_grams(self):
+		self.assertEqual(frappe.get_meta("Shipment Parcel").get_field("weight").precision, "3")
+		column = frappe.db.sql("show columns from `tabShipment Parcel` like 'weight'")[0][1]
+		self.assertEqual(column, "decimal(21,3)")
