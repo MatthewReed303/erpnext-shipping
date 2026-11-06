@@ -234,6 +234,8 @@ def print_shipping_label(shipment: str):
 		]
 		if tracking_numbers and not shipment_doc.awb_number:
 			shipment_doc.db_set("awb_number", ", ".join(tracking_numbers))
+		if not shipment_doc.tracking_status:
+			shipment_doc.db_set("tracking_status", "Printed")
 
 	return shipping_label
 

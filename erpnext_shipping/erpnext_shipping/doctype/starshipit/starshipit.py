@@ -216,7 +216,13 @@ class StarshipitUtils:
 		shipment_doc = frappe.get_doc("Shipment", shipment)
 		parcels = json.loads(shipment_parcel) if isinstance(shipment_parcel, str) else shipment_parcel
 		carrier_code, service_code = split_service_id(service_info)
-		currency = frappe.get_cached_value("Company", shipment_doc.company, "default_currency")
+		company = (
+			shipment_doc.get("pickup_company")
+			or shipment_doc.get("delivery_company")
+			or frappe.defaults.get_user_default("Company")
+			or frappe.db.get_single_value("Global Defaults", "default_company")
+		)
+		currency = frappe.get_cached_value("Company", company, "default_currency") if company else None
 		order = {
 			"order_number": shipment,
 			"reference": ", ".join(d.delivery_note for d in shipment_doc.shipment_delivery_note) or shipment,
@@ -283,7 +289,7 @@ class StarshipitUtils:
 
 	def print_label(self, shipment_doc) -> tuple[list[bytes], list[str]]:
 		"""Label PDFs and tracking numbers for the Starshipit order behind a Shipment."""
-		reprint = bool(shipment_doc.awb_number)
+		reprint = self.already_printed(shipment_doc)
 		if not reprint and not self.settings.allow_label_printing:
 			frappe.throw(
 				_(
@@ -295,13 +301,53 @@ class StarshipitUtils:
 				),
 				title=_("Label Printing Disabled"),
 			)
+		payload = {"order_id": int(shipment_doc.shipment_id), "reprint": reprint}
+		if not reprint:
+			# Starshipit needs the courier and service on the label request itself
+			service = self.order_service(shipment_doc)
+			payload.update(carrier=service.carrier_code, carrier_service_code=service.service_code)
+		data = self.request("POST", "/orders/shipment", payload=payload)
+		labels = [base64.b64decode(label) for label in data.get("labels") or []]
+		return labels, [number for number in data.get("tracking_numbers") or [] if number]
+
+	def already_printed(self, shipment_doc) -> bool:
+		"""True when a label exists, so printing again is a free reprint.
+
+		Checks Starshipit when ERPNext has no record of a label (plain labels have no tracking
+		number, and a failed request can leave ERPNext behind).
+		"""
+		if shipment_doc.awb_number or shipment_doc.get("tracking_status"):
+			return True
+		try:
+			order = self.request(
+				"GET", "/orders", params={"order_id": int(shipment_doc.shipment_id)}, log_errors=False
+			).get("order")
+		except frappe.ValidationError:
+			frappe.clear_messages()
+			return False
+		return bool(order) and cstr(order.get("status")).lower() not in ("", "unshipped", "new")
+
+	def order_service(self, shipment_doc):
+		"""The Starshipit service chosen for this Shipment (matched by service name), with its codes."""
 		data = self.request(
 			"POST",
-			"/orders/shipment",
-			payload={"order_id": int(shipment_doc.shipment_id), "reprint": reprint},
+			"/deliveryservices",
+			payload={"order_id": int(shipment_doc.shipment_id), "include_pricing": False},
 		)
-		labels = [base64.b64decode(label) for label in data.get("labels") or []]
-		return labels, data.get("tracking_numbers") or []
+		services = [self.service_dict(service) for service in data.get("services") or []]
+		chosen = [s for s in services if s.service_name == shipment_doc.carrier_service]
+		if not chosen and len(services) == 1:
+			chosen = services
+		if not chosen:
+			frappe.throw(
+				_(
+					"The service {0} is no longer available for Starshipit order {1}. Print the label in Starshipit."
+				).format(
+					frappe.bold(shipment_doc.carrier_service or "?"), frappe.bold(shipment_doc.shipment_id)
+				),
+				title=_("Starshipit"),
+			)
+		return chosen[0]
 
 	# --- Tracking -------------------------------------------------------------
 
@@ -435,6 +481,8 @@ def cancel_shipment_order(doc, method=None):
 @frappe.whitelist(allow_guest=True, methods=["POST"])
 def webhook(token: str | None = None):
 	"""Tracking update pushed by Starshipit. Authenticated by the token in the webhook URL."""
+	# Starshipit posts JSON, so Frappe takes the arguments from the body; the token is in the URL query
+	token = token or (frappe.request.args.get("token") if frappe.request else None)
 	expected = frappe.db.get_single_value("Starshipit", "webhook_token")
 	if not expected or not token or not secrets.compare_digest(cstr(token), cstr(expected)):
 		raise frappe.PermissionError

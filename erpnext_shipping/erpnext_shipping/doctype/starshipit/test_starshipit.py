@@ -147,10 +147,11 @@ class TestStarshipit(IntegrationTestCase):
 
 	@patch(REQUESTS)
 	def test_label_printing_refused_unless_allowed(self, request):
+		request.return_value = response({"order": {"order_id": 123, "status": "Unshipped"}, "success": True})
 		shipment = frappe._dict(shipment_id="123", awb_number="")
 		with self.assertRaises(frappe.ValidationError):
 			StarshipitUtils().print_label(shipment)
-		request.assert_not_called()
+		self.assertEqual([c.args[0] for c in request.call_args_list], ["GET"])  # only the status check
 
 	@patch(REQUESTS)
 	def test_reprint_is_always_allowed(self, request):
@@ -168,12 +169,39 @@ class TestStarshipit(IntegrationTestCase):
 	@patch(REQUESTS)
 	def test_label_printed_when_allowed(self, request):
 		frappe.db.set_single_value("Starshipit", "allow_label_printing", 1)
-		request.return_value = response({"labels": [], "tracking_numbers": ["TN2"], "success": True})
-		_labels, tracking_numbers = StarshipitUtils().print_label(
-			frappe._dict(shipment_id="456", awb_number="")
+		services = [
+			{
+				"carrier": "PlainLabel",
+				"carrier_name": "Plain Label",
+				"service_name": "Plain Label - My Carrier",
+				"service_code": "Plain Label",
+			},
+			{
+				"carrier": "NZPost",
+				"carrier_name": "NZ Post",
+				"service_name": "Overnight",
+				"service_code": "CPOLP",
+			},
+		]
+		request.side_effect = [
+			response({"order": {"order_id": 456, "status": "Unshipped"}, "success": True}),
+			response({"services": services, "success": True}),
+			response({"labels": [], "tracking_numbers": [None], "success": True}),
+		]
+		shipment = frappe._dict(shipment_id="456", awb_number="", carrier_service="Plain Label - My Carrier")
+		_labels, tracking_numbers = StarshipitUtils().print_label(shipment)
+		self.assertEqual(tracking_numbers, [])  # plain labels have no tracking number
+		_status, lookup, label = request.call_args_list
+		self.assertEqual(lookup.kwargs["json"], {"order_id": 456, "include_pricing": False})
+		self.assertEqual(
+			label.kwargs["json"],
+			{
+				"order_id": 456,
+				"reprint": False,
+				"carrier": "PlainLabel",
+				"carrier_service_code": "Plain Label",
+			},
 		)
-		self.assertEqual(tracking_numbers, ["TN2"])
-		self.assertEqual(request.call_args.kwargs["json"], {"order_id": 456, "reprint": False})
 
 	@patch(REQUESTS)
 	def test_cancel_deletes_unprinted_and_archives_printed(self, request):
@@ -222,7 +250,11 @@ class TestStarshipit(IntegrationTestCase):
 
 	def create_test_shipment(self, request):
 		company = frappe.db.get_value("Company", {}, "name")
-		shipment = frappe._dict(name="SHIP-TEST-1", company=company, shipment_delivery_note=[])
+		# a real (unsaved) Shipment, so the code can only use fields Shipment actually has
+		shipment = frappe.new_doc("Shipment")
+		shipment.name = "SHIP-TEST-1"
+		shipment.pickup_from_type = "Company"
+		shipment.pickup_company = company
 		original_get_doc = frappe.get_doc
 
 		def get_doc(*args, **kwargs):
@@ -300,3 +332,27 @@ class TestStarshipit(IntegrationTestCase):
 		StarshipitUtils().request("GET", "/orders/unshipped")
 		self.assertEqual(request.call_count, 2)
 		sleep.assert_called_once_with(1)
+
+	@patch(REQUESTS)
+	def test_printed_in_starshipit_is_reprinted_not_booked_again(self, request):
+		request.side_effect = [
+			response({"order": {"order_id": 789, "status": "Printed"}, "success": True}),
+			response({"labels": [], "tracking_numbers": [], "success": True}),
+		]
+		StarshipitUtils().print_label(frappe._dict(shipment_id="789", awb_number="", tracking_status=""))
+		self.assertEqual(request.call_args.kwargs["json"], {"order_id": 789, "reprint": True})
+
+	def test_webhook_reads_token_from_url_and_updates_shipment(self):
+		from werkzeug.test import EnvironBuilder
+		from werkzeug.wrappers import Request
+
+		from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import webhook
+
+		token = frappe.db.get_single_value("Starshipit", "webhook_token")
+		body = {"order_number": "NO-SUCH-SHIPMENT", "tracking_status": "Dispatched"}
+		builder = EnvironBuilder(method="POST", path="/", query_string={"token": token}, json=body)
+		frappe.local.request = Request(builder.get_environ())
+		try:
+			self.assertEqual(webhook(), {"ok": True, "matched": False})
+		finally:
+			del frappe.local.request
