@@ -376,13 +376,12 @@ class StarshipitUtils:
 		if not reprint and not self.settings.allow_label_printing:
 			frappe.throw(
 				_(
-					"Printing labels from ERPNext is switched off because it books the consignment and is "
-					"charged. Print the label in Starshipit (order {0}), or enable Allow Label Printing in {1}."
+					"Label printing is off for {0}. Print it in Starshipit, or enable Allow Label Printing in {1}."
 				).format(
 					frappe.bold(shipment_doc.name),
 					get_link_to_form("Starshipit", "Starshipit", _("Starshipit Settings")),
 				),
-				title=_("Label Printing Disabled"),
+				title=_("Label Printing Off"),
 			)
 		payload = {"order_id": cint(shipment_doc.shipment_id), "reprint": reprint}
 		if not reprint:
@@ -408,9 +407,7 @@ class StarshipitUtils:
 			chosen = services
 		if not chosen:
 			frappe.throw(
-				_(
-					"The service {0} is not available for this order. Choose the service in Starshipit."
-				).format(frappe.bold(shipment_doc.carrier_service or "?")),
+				_("{0} is not available for this order.").format(frappe.bold(shipment_doc.carrier_service or "?")),
 				title=_("Starshipit"),
 			)
 		return chosen[0]
@@ -609,7 +606,7 @@ def order_items(shipment_doc, description_of_content: str | None, value_of_goods
 		for item in frappe.get_all(
 			"Delivery Note Item",
 			filters={"parent": row.delivery_note},
-			fields=["item_code", "item_name", "qty", "base_rate", "weight_per_unit", "weight_uom"],
+			fields=["item_code", "item_name", "stock_qty", "base_amount", "weight_per_unit", "weight_uom"],
 			order_by="idx",
 		):
 			tariff_code, origin = frappe.get_cached_value(
@@ -618,8 +615,9 @@ def order_items(shipment_doc, description_of_content: str | None, value_of_goods
 			line = {
 				"description": item.item_name,
 				"sku": cstr(item.item_code)[:50],
-				"quantity": flt(item.qty),
-				"value": flt(item.base_rate),  # company currency, as sent in "currency"
+				# per stock unit, like weight_per_unit; value in the company currency sent as "currency"
+				"quantity": flt(item.stock_qty),
+				"value": flt(flt(item.base_amount) / flt(item.stock_qty), 2) if item.stock_qty else 0,
 			}
 			weight = kg_per_unit(item.weight_per_unit, item.weight_uom)
 			if weight:
@@ -771,7 +769,7 @@ def book_pickup(
 	job_number = StarshipitUtils().book_pickup(doc, special_instructions)
 	doc.add_comment(
 		"Info",
-		_("Pickup booked with Starshipit for {0}, {1} to {2}. Job number: {3}").format(
+		_("Pickup booked for {0}, {1} to {2}. Job number: {3}").format(
 			frappe.format(doc.pickup_date, {"fieldtype": "Date"}),
 			cstr(doc.pickup_from)[:5],
 			cstr(doc.pickup_to)[:5],
@@ -807,10 +805,7 @@ def cancel_shipment_order(doc, method=None):
 		return
 	if result == "archived":
 		frappe.msgprint(
-			_(
-				"The Starshipit order was archived. A printed label may still be charged by the courier; "
-				"cancel the consignment with the courier if it will not be sent."
-			),
+			_("Starshipit order archived. Cancel the consignment with the courier if it won't be sent."),
 			indicator="orange",
 			alert=True,
 		)

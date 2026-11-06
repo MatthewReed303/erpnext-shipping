@@ -4,7 +4,7 @@ import re
 
 import frappe
 from frappe import _
-from frappe.utils import flt
+from frappe.utils import ceil, flt
 from frappe.utils.data import get_link_to_form
 
 
@@ -146,35 +146,68 @@ def update_tracking_info_daily():
 
 
 def fill_parcels_from_items(doc, method=None):
-	"""Shipment before_validate: when a draft Shipment has no parcels, add one from its items.
+	"""Shipment before_validate: when a draft Shipment has no parcels, add them from its items.
 
-	Weight = sum of item weight x quantity from the Delivery Notes, plus the box from the Parcel
-	Template (the Shipment's, else Starshipit's default). Size comes from the template. Nothing is
-	filled when no item has a weight; parcels can always be edited or split by hand.
+	Items marked "Ships in Own Box" get one parcel per unit in their own Parcel Template. All other
+	items share one parcel: the Shipment's Parcel Template, else the largest Parcel Template of those
+	items, else Starshipit's default. Parcel weight = items + box. Parcels can be edited by hand.
 	"""
-	from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import kg_per_unit
-
 	if doc.docstatus != 0 or doc.shipment_parcel or not doc.shipment_delivery_note:
 		return
-	items_weight = 0.0
+	from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import kg_per_unit
+
+	lines = []
 	for row in doc.shipment_delivery_note:
 		for item in frappe.get_all(
 			"Delivery Note Item",
 			filters={"parent": row.delivery_note},
-			fields=["qty", "weight_per_unit", "weight_uom"],
+			fields=["item_code", "stock_qty", "weight_per_unit", "weight_uom"],
+			order_by="idx",
 		):
-			items_weight += (kg_per_unit(item.weight_per_unit, item.weight_uom) or 0) * flt(item.qty)
-	if not items_weight:
-		return
-	template_name = doc.parcel_template or frappe.db.get_single_value("Starshipit", "default_parcel_template")
-	template = frappe.get_cached_doc("Shipment Parcel Template", template_name) if template_name else None
-	doc.append(
-		"shipment_parcel",
-		{
+			template, own_box = frappe.get_cached_value(
+				"Item", item.item_code, ["shipping_parcel_template", "ships_in_own_box"]
+			) or (None, 0)
+			lines.append(
+				frappe._dict(
+					qty=flt(item.stock_qty),  # weight_per_unit is per stock unit
+					kg=kg_per_unit(item.weight_per_unit, item.weight_uom) or 0,
+					template=template,
+					own_box=own_box,
+				)
+			)
+	default = frappe.db.get_single_value("Starshipit", "default_parcel_template")
+	for parcel in parcels_for_items(lines, doc.parcel_template, default):
+		doc.append("shipment_parcel", parcel)
+
+
+def parcels_for_items(lines: list[dict], shipment_template: str | None, default_template: str | None):
+	"""Parcels (cm, kg) for item lines of {qty, kg per unit, template, own_box}."""
+
+	def box(name):
+		return frappe.get_cached_doc("Shipment Parcel Template", name) if name else None
+
+	def parcel(template, items_kg, count=1):
+		return {
 			"length": template.length if template else 0,
 			"width": template.width if template else 0,
 			"height": template.height if template else 0,
-			"weight": flt(items_weight + flt(template.weight if template else 0), 3),
-			"count": 1,
-		},
-	)
+			"weight": flt(items_kg + flt(template.weight if template else 0), 3),
+			"count": count,
+		}
+
+	parcels, shared_kg, shared_boxes = [], 0.0, []
+	for line in lines:
+		line = frappe._dict(line)
+		if line.own_box:
+			template = box(line.template or default_template)
+			own = parcel(template, flt(line.kg), max(ceil(flt(line.qty)), 1))
+			if own["weight"] > 0:
+				parcels.append(own)
+			continue
+		shared_kg += flt(line.kg) * flt(line.qty)
+		if line.template:
+			shared_boxes.append(box(line.template))
+	if shared_kg:
+		largest = max(shared_boxes, key=lambda b: flt(b.length) * flt(b.width) * flt(b.height), default=None)
+		parcels.insert(0, parcel(box(shipment_template) or largest or box(default_template), shared_kg))
+	return parcels

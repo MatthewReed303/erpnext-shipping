@@ -2,3 +2,4 @@ erpnext_shipping.erpnext_shipping.patches.create_custom_delivery_note_fields # 2
 erpnext_shipping.erpnext_shipping.patches.change_tracking_url_column_type
 execute:from erpnext_shipping.install import after_install;after_install()
 execute:from erpnext_shipping.install import after_install;after_install() # 2026-11-06 parcel weight precision and column
+execute:from erpnext_shipping.install import after_install;after_install() # 2026-11-07 item parcel template and own box

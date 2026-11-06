@@ -613,6 +613,49 @@ class TestStarshipit(IntegrationTestCase):
 		self.webhook_request(body, headers={"X-Starshipit-Signature": signature})
 		self.assertEqual(webhook(), {"ok": True, "matched": False})
 
+	def box(self, name, length, width, height, weight):
+		if not frappe.db.exists("Shipment Parcel Template", name):
+			frappe.get_doc(
+				{
+					"doctype": "Shipment Parcel Template",
+					"parcel_template_name": name,
+					"length": length,
+					"width": width,
+					"height": height,
+					"weight": weight,
+				}
+			).insert(ignore_permissions=True)
+		return name
+
+	def test_parcels_for_items(self):
+		from erpnext_shipping.erpnext_shipping.utils import parcels_for_items
+
+		small = self.box("_Test Box Small", 20, 15, 10, 0.1)
+		large = self.box("_Test Box Large", 40, 30, 20, 0.3)
+		psu = self.box("_Test Box PSU", 30, 20, 15, 0.2)
+		node = {"qty": 2, "kg": 0.25, "template": small, "own_box": 0}
+		hat = {"qty": 3, "kg": 0.12, "template": large, "own_box": 0}
+		power = {"qty": 2, "kg": 1.5, "template": psu, "own_box": 1}
+
+		# items share the largest of their boxes; own-box items get one parcel per unit
+		self.assertEqual(
+			parcels_for_items([node, hat, power], None, small),
+			[
+				{"length": 40, "width": 30, "height": 20, "weight": 1.16, "count": 1},
+				{"length": 30, "width": 20, "height": 15, "weight": 1.7, "count": 2},
+			],
+		)
+		# the Shipment's Parcel Template wins for the shared parcel
+		self.assertEqual(parcels_for_items([node], small, large)[0]["length"], 20)
+		# no item box: Starshipit's default
+		self.assertEqual(
+			parcels_for_items([{"qty": 1, "kg": 0.5}], None, large),
+			[{"length": 40, "width": 30, "height": 20, "weight": 0.8, "count": 1}],
+		)
+		# nothing weighable: no parcel (ERPNext refuses 0 kg parcels)
+		self.assertEqual(parcels_for_items([{"qty": 1, "kg": 0, "own_box": 1}], None, None), [])
+		self.assertEqual(parcels_for_items([{"qty": 1, "kg": 0}], None, large), [])
+
 	def test_parcel_weight_keeps_grams(self):
 		self.assertEqual(frappe.get_meta("Shipment Parcel").get_field("weight").precision, "3")
 		column = frappe.db.sql("show columns from `tabShipment Parcel` like 'weight'")[0][1]

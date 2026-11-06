@@ -63,5 +63,10 @@ On a submitted Shipment:
 - **Tools > Update Tracking** (and the daily job) reads the order status and courier tracking. For updates as they happen, paste the **Webhook URL** into Starshipit's webhook setting; set a **Webhook Secret** in both places to have every webhook signed (X-Starshipit-Signature).
 - Cancelling the Shipment deletes the Starshipit order, or archives it once a label was printed.
 
-When a draft Shipment has no parcels, one is added from its Delivery Notes: the items' weight times quantity plus the box from the Parcel Template (the Shipment's, else the Default Parcel Template in Starshipit settings).
+When a draft Shipment has no parcels, they are added from its Delivery Notes. On each Item (Inventory tab) you can set the **Parcel Template** it ships in and tick **Ships in Own Box**:
+
+- items that ship in their own box get one parcel per unit, in their own Parcel Template;
+- all other items share one parcel: the Shipment's Parcel Template, else the largest Parcel Template of those items, else the Default Parcel Template in Starshipit settings.
+
+Parcel weight is the items' weight (per stock unit, times stock quantity) plus the box weight. Parcels can always be edited by hand before fetching rates.
 

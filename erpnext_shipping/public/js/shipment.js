@@ -242,7 +242,7 @@ function add_starshipit_buttons(frm) {
 		__("Manifest"),
 		() =>
 			frappe.confirm(
-				__("Manifesting sends this order to the courier for billing. Continue?"),
+				__("Manifest this order? It is sent to the courier for billing."),
 				() =>
 					frappe.call({
 						method: STARSHIPIT_METHOD + "manifest_shipment",
@@ -294,6 +294,7 @@ function show_pickup_dialog(frm) {
 				reqd: 1,
 				default: frm.doc.pickup_from || "09:00:00",
 			},
+			{ fieldtype: "Column Break" },
 			{
 				fieldname: "pickup_to",
 				fieldtype: "Time",
@@ -302,7 +303,7 @@ function show_pickup_dialog(frm) {
 				default: frm.doc.pickup_to || "17:00:00",
 			},
 			{ fieldtype: "Section Break" },
-			{ fieldname: "special_instructions", fieldtype: "Small Text", label: __("Instructions for the Courier") },
+			{ fieldname: "special_instructions", fieldtype: "Small Text", label: __("Special Instructions") },
 		],
 		primary_action_label: __("Book Pickup"),
 		primary_action(values) {

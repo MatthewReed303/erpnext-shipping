@@ -3,6 +3,25 @@ from .utils import identity as _
 
 def get_custom_fields():
 	return {
+		"Item": [
+			{
+				"fieldname": "shipping_parcel_template",
+				"label": _("Parcel Template"),
+				"fieldtype": "Link",
+				"options": "Shipment Parcel Template",
+				"description": _("Box this item ships in"),
+				"depends_on": "eval:doc.is_stock_item",
+				"insert_after": "weight_uom",
+			},
+			{
+				"fieldname": "ships_in_own_box",
+				"label": _("Ships in Own Box"),
+				"fieldtype": "Check",
+				"description": _("Never packed with other items"),
+				"depends_on": "eval:doc.is_stock_item",
+				"insert_after": "shipping_parcel_template",
+			},
+		],
 		"Delivery Note": [
 			{
 				"fieldname": "shipping_sec_break",
