@@ -10,6 +10,10 @@ from erpnext_shipping.erpnext_shipping.doctype.letmeship.letmeship import (
 	get_letmeship_utils,
 )
 from erpnext_shipping.erpnext_shipping.doctype.sendcloud.sendcloud import SENDCLOUD_PROVIDER, SendCloudUtils
+from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import (
+	STARSHIPIT_PROVIDER,
+	StarshipitUtils,
+)
 from erpnext_shipping.erpnext_shipping.utils import (
 	get_address,
 	get_contact,
@@ -34,6 +38,7 @@ def fetch_shipping_rates(
 	shipment_prices = []
 	letmeship_enabled = frappe.db.get_single_value("LetMeShip", "enabled")
 	sendcloud_enabled = frappe.db.get_single_value("SendCloud", "enabled")
+	starshipit_enabled = frappe.db.get_single_value("Starshipit", "enabled")
 	pickup_address = get_address(pickup_address_name)
 	delivery_address = get_address(delivery_address_name)
 	parcels = json.loads(parcels)
@@ -77,6 +82,16 @@ def fetch_shipping_rates(
 		)
 		sendcloud_prices = match_parcel_service_type_carrier(sendcloud_prices, "carrier", "service_name")
 		shipment_prices += sendcloud_prices
+
+	if starshipit_enabled:
+		starshipit_prices = StarshipitUtils().get_available_services(
+			pickup_address=pickup_address,
+			delivery_address=delivery_address,
+			parcels=parcels,
+			value_of_goods=value_of_goods,
+		)
+		starshipit_prices = match_parcel_service_type_carrier(starshipit_prices, "carrier", "service_name")
+		shipment_prices += starshipit_prices
 
 	shipment_prices = [item for item in shipment_prices if "total_price" in item]
 	shipment_prices = sorted(shipment_prices, key=lambda k: k["total_price"])
@@ -149,6 +164,20 @@ def create_shipment(
 			service_info=service_info,
 		)
 
+	if service_info["service_provider"] == STARSHIPIT_PROVIDER:
+		shipment_info = StarshipitUtils().create_shipment(
+			shipment=shipment,
+			pickup_address=pickup_address,
+			pickup_contact=pickup_contact,
+			delivery_address=delivery_address,
+			delivery_contact=delivery_contact,
+			delivery_company_name=delivery_company_name,
+			shipment_parcel=shipment_parcel,
+			description_of_content=description_of_content,
+			value_of_goods=value_of_goods,
+			service_info=service_info,
+		)
+
 	if shipment_info:
 		shipment = frappe.get_doc("Shipment", shipment)
 		shipment.db_set(
@@ -198,6 +227,13 @@ def print_shipping_label(shipment: str):
 			content = sendcloud.download_label(label_url)
 			file_url = save_label_as_attachment(shipment, content, i)
 			shipping_label.append(file_url)
+	elif service_provider == STARSHIPIT_PROVIDER:
+		labels, tracking_numbers = StarshipitUtils().print_label(shipment_doc)
+		shipping_label = [
+			save_label_as_attachment(shipment, content, i) for i, content in enumerate(labels, start=1)
+		]
+		if tracking_numbers and not shipment_doc.awb_number:
+			shipment_doc.db_set("awb_number", ", ".join(tracking_numbers))
 
 	return shipping_label
 
@@ -234,6 +270,9 @@ def update_tracking(shipment, service_provider, shipment_id, delivery_notes=None
 	elif service_provider == SENDCLOUD_PROVIDER:
 		sendcloud = SendCloudUtils()
 		tracking_data = sendcloud.get_tracking_data(shipment_id)
+	elif service_provider == STARSHIPIT_PROVIDER:
+		# Starshipit tracks by order number, which is the Shipment name
+		tracking_data = StarshipitUtils().get_tracking_data(shipment)
 
 	if not tracking_data:
 		return

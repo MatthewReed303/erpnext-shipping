@@ -1,0 +1,120 @@
+{
+ "actions": [],
+ "creation": "2026-11-06 20:00:00.000000",
+ "description": "Starshipit shipping integration: rates from every courier on your Starshipit account, orders, labels, tracking and cancellations.",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "enabled",
+  "api_key",
+  "subscription_key",
+  "column_break_keys",
+  "default_parcel_template",
+  "signature_required",
+  "labels_section",
+  "allow_label_printing",
+  "webhook_section",
+  "webhook_url",
+  "webhook_token"
+ ],
+ "fields": [
+  {
+   "default": "0",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Enabled"
+  },
+  {
+   "description": "Starshipit: Settings > API > API Key",
+   "fieldname": "api_key",
+   "fieldtype": "Password",
+   "label": "API Key",
+   "mandatory_depends_on": "enabled"
+  },
+  {
+   "description": "Starshipit: Settings > API > Subscription Key",
+   "fieldname": "subscription_key",
+   "fieldtype": "Password",
+   "label": "Subscription Key",
+   "mandatory_depends_on": "enabled"
+  },
+  {
+   "fieldname": "column_break_keys",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Package size and weight used for rate quotes when a parcel has no dimensions, e.g. for checkout rates.",
+   "fieldname": "default_parcel_template",
+   "fieldtype": "Link",
+   "label": "Default Parcel Template",
+   "options": "Shipment Parcel Template"
+  },
+  {
+   "default": "0",
+   "fieldname": "signature_required",
+   "fieldtype": "Check",
+   "label": "Signature Required"
+  },
+  {
+   "fieldname": "labels_section",
+   "fieldtype": "Section Break",
+   "label": "Labels"
+  },
+  {
+   "default": "0",
+   "description": "Printing a label books the consignment with the courier, which is charged to your courier account. While this is off, Print Shipping Label refuses and labels are printed in Starshipit instead. Reprinting an existing label is always allowed.",
+   "fieldname": "allow_label_printing",
+   "fieldtype": "Check",
+   "label": "Allow Label Printing"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "webhook_section",
+   "fieldtype": "Section Break",
+   "label": "Tracking Webhook"
+  },
+  {
+   "description": "Paste this into Starshipit's tracking webhook (notification URL) setting, so tracking updates reach ERPNext as they happen. Keep it private: the token in it is the only check on incoming updates.",
+   "fieldname": "webhook_url",
+   "fieldtype": "Small Text",
+   "is_virtual": 1,
+   "label": "Webhook URL",
+   "read_only": 1
+  },
+  {
+   "fieldname": "webhook_token",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Webhook Token",
+   "no_copy": 1,
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-11-06 20:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "ERPNext Shipping",
+ "name": "Starshipit",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "quick_entry": 1,
+ "row_format": "Dynamic",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

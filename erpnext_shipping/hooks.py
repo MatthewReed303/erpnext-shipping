@@ -126,6 +126,9 @@ doc_events = {
 	"Shipment": {
 		"validate": [
 			"erpnext_shipping.erpnext_shipping.utils.validate_phone",
-		]
+		],
+		"on_cancel": [
+			"erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit.cancel_shipment_order",
+		],
 	},
 }
