@@ -33,6 +33,7 @@ def fetch_shipping_rates(
 	value_of_goods,
 	pickup_contact_name=None,
 	delivery_contact_name=None,
+	shipment=None,
 ):
 	# Return Shipping Rates for the various Shipping Providers
 	frappe.has_permission("Shipment", "create", throw=True)
@@ -96,6 +97,10 @@ def fetch_shipping_rates(
 
 	shipment_prices = [item for item in shipment_prices if "total_price" in item]
 	shipment_prices = sorted(shipment_prices, key=lambda k: k["total_price"])
+	if shipment:
+		from erpnext_shipping.erpnext_shipping.shop_integration import mark_preferred
+
+		shipment_prices = mark_preferred(shipment_prices, shipment)
 	return shipment_prices
 
 
@@ -130,14 +135,15 @@ def create_shipment(
 	delivery_address = get_address(delivery_address_name)
 	delivery_company_name = get_delivery_company_name(shipment)
 
+	needs_last_name = service_info["service_provider"] != STARSHIPIT_PROVIDER
 	if pickup_from_type != "Company":
-		pickup_contact = get_contact(pickup_contact_name)
+		pickup_contact = get_contact(pickup_contact_name, require_last_name=needs_last_name)
 
 	else:
 		pickup_contact = get_company_contact(user=pickup_contact_name)
 		pickup_contact.email_id = pickup_contact.pop("email", None)
 
-	delivery_contact = get_contact(delivery_contact_name)
+	delivery_contact = get_contact(delivery_contact_name, require_last_name=needs_last_name)
 
 	if service_info["service_provider"] == LETMESHIP_PROVIDER:
 		letmeship = get_letmeship_utils()

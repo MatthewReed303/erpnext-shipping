@@ -21,6 +21,24 @@ def get_custom_fields():
 				"depends_on": "eval:doc.is_stock_item",
 				"insert_after": "shipping_parcel_template",
 			},
+			{
+				"fieldname": "ships_domestic_only",
+				"label": _("Domestic Shipping Only"),
+				"fieldtype": "Check",
+				"description": _("Can't be sent overseas, e.g. lithium batteries on their own"),
+				"depends_on": "eval:doc.is_stock_item",
+				"insert_after": "ships_in_own_box",
+			},
+		],
+		"Shipment": [
+			{
+				"fieldname": "preferred_service",
+				"label": _("Customer's Choice"),
+				"fieldtype": "Small Text",
+				"read_only": 1,
+				"description": _("Shipping service the customer chose at checkout"),
+				"insert_after": "shipment_type",
+			},
 		],
 		"Delivery Note": [
 			{

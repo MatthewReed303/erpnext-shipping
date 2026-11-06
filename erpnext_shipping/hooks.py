@@ -135,3 +135,9 @@ doc_events = {
 		],
 	},
 }
+
+# Shop app (online store): Starshipit rates at checkout, and store orders as Shipments
+shop_shipping_rate_providers = ["erpnext_shipping.erpnext_shipping.shop_integration.checkout_rates"]
+shop_fulfillment_providers = {
+	"starshipit": "erpnext_shipping.erpnext_shipping.shop_integration.StarshipitFulfillment",
+}

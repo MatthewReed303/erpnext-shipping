@@ -609,9 +609,11 @@ def order_items(shipment_doc, description_of_content: str | None, value_of_goods
 			fields=["item_code", "item_name", "stock_qty", "base_amount", "weight_per_unit", "weight_uom"],
 			order_by="idx",
 		):
-			tariff_code, origin = frappe.get_cached_value(
-				"Item", item.item_code, ["customs_tariff_number", "country_of_origin"]
+			tariff_code, origin, is_stock = frappe.get_cached_value(
+				"Item", item.item_code, ["customs_tariff_number", "country_of_origin", "is_stock_item"]
 			)
+			if not is_stock and not item.weight_per_unit:
+				continue  # shipping, fees and other services are not goods in the parcel
 			line = {
 				"description": item.item_name,
 				"sku": cstr(item.item_code)[:50],

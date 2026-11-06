@@ -70,11 +70,12 @@ def get_country_code(country_name):
 	return country_code
 
 
-def get_contact(contact_name):
+def get_contact(contact_name, require_last_name=True):
 	fields = ["first_name", "last_name", "email_id", "phone", "mobile_no", "gender"]
 	contact = frappe.db.get_value("Contact", contact_name, fields, as_dict=1)
 
-	if not contact.last_name:
+	# LetMeShip needs a separate last name; Starshipit takes the full name
+	if require_last_name and not contact.last_name:
 		frappe.throw(
 			msg=_("Please set Last Name for Contact {0}").format(get_link_to_form("Contact", contact_name)),
 			title=_("Last Name is mandatory to continue."),

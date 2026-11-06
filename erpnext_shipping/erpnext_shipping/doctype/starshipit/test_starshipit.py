@@ -31,7 +31,7 @@ from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import (
 
 # The settings link to Shipment Parcel Template; its sample records need a full ERPNext test setup
 # and are not used here.
-IGNORE_TEST_RECORD_DEPENDENCIES = ["Shipment Parcel Template"]
+IGNORE_TEST_RECORD_DEPENDENCIES = ["Shipment Parcel Template", "Address", "User"]
 
 MODULE = "erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit"
 REQUESTS = MODULE + ".requests.request"
@@ -660,3 +660,126 @@ class TestStarshipit(IntegrationTestCase):
 		self.assertEqual(frappe.get_meta("Shipment Parcel").get_field("weight").precision, "3")
 		column = frappe.db.sql("show columns from `tabShipment Parcel` like 'weight'")[0][1]
 		self.assertEqual(column, "decimal(21,3)")
+
+
+class TestStarshipitStore(IntegrationTestCase):
+	"""Starshipit for the Shop app: checkout rates and order status."""
+
+	def setUp(self):
+		from erpnext_shipping.erpnext_shipping import shop_integration
+
+		self.si = shop_integration
+		settings = frappe.get_single("Starshipit")
+		settings.enabled = 1
+		settings.api_key = "test-key"
+		settings.subscription_key = "test-subscription"
+		settings.shop_checkout_rates = 1
+		settings.checkout_services = ""
+		settings.sender_address = self.sender()
+		settings.save()
+		frappe.clear_cache(doctype="Starshipit")
+		frappe.cache.delete_keys("starshipit_rates:")
+		self.item = self.weighed_item("_Test Starshipit Store Item", 0.4)
+		sleep = patch(MODULE + ".time.sleep")
+		sleep.start()
+		self.addCleanup(sleep.stop)
+
+	def tearDown(self):
+		frappe.db.set_single_value("Starshipit", {"enabled": 0, "shop_checkout_rates": 0})
+		frappe.clear_cache(doctype="Starshipit")
+
+	def sender(self) -> str:
+		name = "_Test Starshipit Sender-Shipping"
+		if not frappe.db.exists("Address", name):
+			frappe.get_doc(
+				{"doctype": "Address", "address_title": "_Test Starshipit Sender", "address_type": "Shipping",
+				 "address_line1": "1 Queen Street", "city": "Auckland", "pincode": "1010", "country": "New Zealand"}
+			).insert(ignore_permissions=True)
+		return name
+
+	def weighed_item(self, code: str, kg: float, domestic_only: int = 0) -> str:
+		if not frappe.db.exists("Item", code):
+			frappe.get_doc(
+				{"doctype": "Item", "item_code": code, "item_name": code, "item_group": "All Item Groups",
+				 "stock_uom": "Nos", "is_stock_item": 1, "weight_per_unit": kg, "weight_uom": "Kg"}
+			).insert(ignore_permissions=True)
+		frappe.db.set_value("Item", code, "ships_domestic_only", domestic_only)
+		return code
+
+	def context(self, country="New Zealand", code="nz", items=None):
+		return frappe._dict(
+			cart_items=items or [{"item_code": self.item, "qty": 2, "rate": 100}],
+			address=frappe._dict(address_line1="5 High St", address_line2="", city="Dunedin", state="",
+								 pincode="9016", country=country, country_code=code.upper()),
+			subtotal=200, company=frappe.db.get_value("Company", {}, "name"), currency="NZD",
+		)
+
+	def test_switched_off_returns_nothing(self):
+		frappe.db.set_single_value("Starshipit", "shop_checkout_rates", 0)
+		frappe.clear_cache(doctype="Starshipit")
+		self.assertIsNone(self.si.checkout_rates(self.context()))
+
+	@patch(REQUESTS)
+	def test_rates_from_starshipit_are_cached(self, request):
+		request.return_value = response(
+			{"services": [
+				{"carrier": "CourierPost", "carrier_name": "NZ Post Domestic", "service_name": "Parcel Post", "service_code": "CPOLP", "total_price": 9.5},
+				{"carrier": "CourierPost", "carrier_name": "NZ Post Domestic", "service_name": "Courier", "service_code": "CPOLE", "total_price": 12.0},
+			], "success": True}
+		)
+		result = self.si.checkout_rates(self.context())
+		self.assertEqual([o["amount"] for o in result["options"]], [9.5, 12.0])
+		self.assertEqual(result["options"][0]["id"], "starshipit:CourierPost|CPOLP")
+		self.assertEqual(result["options"][0]["label"], "NZ Post Domestic Parcel Post")
+		package = request.call_args.kwargs["json"]["packages"][0]
+		self.assertEqual(package["weight"], 0.8)  # two items of 0.4 kg, no box set
+		self.si.checkout_rates(self.context())
+		self.assertEqual(request.call_count, 1)  # the second quote came from the cache
+
+	@patch(REQUESTS)
+	def test_only_the_chosen_services_are_offered(self, request):
+		frappe.db.set_single_value("Starshipit", "checkout_services", "CPOLE")
+		frappe.clear_cache(doctype="Starshipit")
+		request.return_value = response(
+			{"services": [
+				{"carrier": "CourierPost", "carrier_name": "NZ Post Domestic", "service_name": "Parcel Post", "service_code": "CPOLP", "total_price": 9.5},
+				{"carrier": "CourierPost", "carrier_name": "NZ Post Domestic", "service_name": "Courier", "service_code": "CPOLE", "total_price": 12.0},
+			], "success": True}
+		)
+		options = self.si.checkout_rates(self.context())["options"]
+		self.assertEqual([o["meta"]["service_code"] for o in options], ["CPOLE"])
+
+	@patch(REQUESTS)
+	def test_domestic_only_items_do_not_go_overseas(self, request):
+		battery = self.weighed_item("_Test Starshipit Battery", 0.3, domestic_only=1)
+		items = [{"item_code": battery, "qty": 1, "rate": 50}]
+		result = self.si.checkout_rates(self.context("Australia", "au", items))
+		self.assertEqual(result["options"], [])
+		self.assertIn("_Test Starshipit Battery", result["messages"][0])
+		request.assert_not_called()
+
+	def test_order_status_follows_the_shipment(self):
+		shipment = frappe._dict(docstatus=1, awb_number="", carrier="NZ Post", tracking_url="", tracking_status="", tracking_status_info="")
+		fulfillment = frappe._dict(external_id="SHIP-X", status="Accepted")
+		provider = self.si.StarshipitFulfillment()
+		for tracking_status, info, expected in (
+			("", "Saved", "Accepted"),
+			("In Progress", "Printed", "Accepted"),  # a label is not a shipped parcel
+			("In Progress", "Manifested", "Shipped"),
+			("In Progress", "In Transit: Picked up", "Shipped"),
+			("Delivered", "Delivered", "Delivered"),
+		):
+			shipment.update(tracking_status=tracking_status, tracking_status_info=info)
+			with patch("frappe.db.exists", return_value=True), patch("frappe.db.get_value", return_value=shipment):
+				self.assertEqual(provider.fetch_status(fulfillment)["status"], expected, info)
+
+	def test_customers_choice_is_marked(self):
+		services = [
+			{"service_provider": STARSHIPIT_PROVIDER, "service_id": "CourierPost|CPOLP", "service_name": "Parcel Post"},
+			{"service_provider": STARSHIPIT_PROVIDER, "service_id": "CourierPost|CPOLE", "service_name": "Courier"},
+		]
+		with patch("frappe.db.exists", return_value=True), patch(
+			"frappe.db.get_value", return_value=json.dumps({"service_id": "CourierPost|CPOLE"})
+		):
+			marked = self.si.mark_preferred(services, "SHIP-X")
+		self.assertEqual([s.get("is_preferred") for s in marked], [None, 1])
