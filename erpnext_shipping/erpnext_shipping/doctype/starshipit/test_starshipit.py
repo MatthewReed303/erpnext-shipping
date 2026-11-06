@@ -220,13 +220,9 @@ class TestStarshipit(IntegrationTestCase):
 		)
 		self.assertEqual(json.loads(json.dumps(service))["service_id"], "Aramex|P")
 
-	@patch(REQUESTS)
-	def test_create_shipment_creates_the_order_without_a_label(self, request):
+	def create_test_shipment(self, request):
 		company = frappe.db.get_value("Company", {}, "name")
 		shipment = frappe._dict(name="SHIP-TEST-1", company=company, shipment_delivery_note=[])
-		request.return_value = response(
-			{"order": {"order_id": 987654, "carrier_name": "NZ Post"}, "success": True}
-		)
 		original_get_doc = frappe.get_doc
 
 		def get_doc(*args, **kwargs):
@@ -235,7 +231,7 @@ class TestStarshipit(IntegrationTestCase):
 			return original_get_doc(*args, **kwargs)
 
 		with patch("frappe.get_doc", side_effect=get_doc):
-			info = StarshipitUtils().create_shipment(
+			return StarshipitUtils().create_shipment(
 				shipment="SHIP-TEST-1",
 				pickup_address=address(),
 				pickup_contact=frappe._dict(
@@ -257,10 +253,20 @@ class TestStarshipit(IntegrationTestCase):
 				},
 			)
 
-		self.assertEqual(request.call_count, 1)
-		method, url = request.call_args.args
-		self.assertEqual((method, url), ("POST", "https://api.starshipit.com/api/orders"))
-		order = request.call_args.kwargs["json"]["order"]
+	@patch(REQUESTS)
+	def test_create_shipment_creates_the_order_without_a_label(self, request):
+		request.side_effect = [
+			response({"success": False, "errors": [{"message": "Order not found"}]}, status=404),
+			response({"order": {"order_id": 987654, "carrier_name": "NZ Post"}, "success": True}),
+		]
+		info = self.create_test_shipment(request)
+
+		self.assertEqual(request.call_count, 2)
+		lookup, create = request.call_args_list
+		self.assertEqual(lookup.args, ("GET", "https://api.starshipit.com/api/orders"))
+		self.assertEqual(lookup.kwargs["params"], {"order_number": "SHIP-TEST-1"})
+		self.assertEqual(create.args, ("POST", "https://api.starshipit.com/api/orders"))
+		order = create.kwargs["json"]["order"]
 		self.assertEqual(order["order_number"], "SHIP-TEST-1")
 		self.assertEqual((order["carrier"], order["carrier_service_code"]), ("NZPost", "CPOLP"))
 		self.assertEqual(order["destination"]["name"], "Ann Lee")
@@ -271,3 +277,26 @@ class TestStarshipit(IntegrationTestCase):
 		self.assertEqual(info["shipment_id"], "987654")
 		self.assertEqual(info["service_provider"], STARSHIPIT_PROVIDER)
 		self.assertEqual(info["awb_number"], "")
+
+	@patch(REQUESTS)
+	def test_repeat_create_updates_instead_of_duplicating(self, request):
+		request.side_effect = [
+			response({"order": {"order_id": 555, "order_number": "SHIP-TEST-1"}, "success": True}),
+			response({"order": {"order_id": 555}, "success": True}),
+		]
+		info = self.create_test_shipment(request)
+
+		methods = [call.args[0] for call in request.call_args_list]
+		self.assertEqual(methods, ["GET", "PUT"])
+		self.assertEqual(request.call_args.kwargs["json"]["order"]["order_id"], 555)
+		self.assertEqual(info["shipment_id"], "555")
+
+	@patch("erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit.time.sleep")
+	@patch(REQUESTS)
+	def test_rate_limit_is_retried_once(self, request, sleep):
+		limited = response({}, status=429)
+		limited.headers = {"Retry-After": "1"}
+		request.side_effect = [limited, response({"orders": [], "success": True})]
+		StarshipitUtils().request("GET", "/orders/unshipped")
+		self.assertEqual(request.call_count, 2)
+		sleep.assert_called_once_with(1)
