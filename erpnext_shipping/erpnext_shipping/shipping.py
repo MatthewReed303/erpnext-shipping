@@ -229,13 +229,26 @@ def print_shipping_label(shipment: str):
 			shipping_label.append(file_url)
 	elif service_provider == STARSHIPIT_PROVIDER:
 		labels, tracking_numbers = StarshipitUtils().print_label(shipment_doc)
-		shipping_label = [
-			save_label_as_attachment(shipment, content, i) for i, content in enumerate(labels, start=1)
-		]
+		shipping_label = []
+		for i, content in enumerate(labels, start=1):
+			# a reprint returns the same label; reuse the attachment instead of adding another copy
+			existing = frappe.db.get_value(
+				"File",
+				{
+					"attached_to_doctype": "Shipment",
+					"attached_to_name": shipment,
+					"file_name": f"label_{shipment}_{i}.pdf",
+				},
+				"file_url",
+			)
+			shipping_label.append(existing or save_label_as_attachment(shipment, content, i))
 		if tracking_numbers and not shipment_doc.awb_number:
 			shipment_doc.db_set("awb_number", ", ".join(tracking_numbers))
 		if not shipment_doc.tracking_status:
 			shipment_doc.db_set("tracking_status", "Printed")
+		for row in shipment_doc.shipment_delivery_note:
+			for file_url in shipping_label:
+				attach_existing_file(file_url, "Delivery Note", row.delivery_note)
 
 	return shipping_label
 
@@ -254,6 +267,24 @@ def save_label_as_attachment(shipment: str, content: bytes, index: int = None) -
 	attachment.is_private = 1
 	attachment.save()
 	return attachment.file_url
+
+
+def attach_existing_file(file_url: str, doctype: str, name: str):
+	"""Also show an already stored file (e.g. a label) on another document, without copying it."""
+	if frappe.db.exists(
+		"File", {"file_url": file_url, "attached_to_doctype": doctype, "attached_to_name": name}
+	):
+		return
+	frappe.get_doc(
+		{
+			"doctype": "File",
+			"file_url": file_url,
+			"file_name": file_url.rsplit("/", 1)[-1],
+			"attached_to_doctype": doctype,
+			"attached_to_name": name,
+			"is_private": 1,
+		}
+	).insert(ignore_permissions=True)
 
 
 @frappe.whitelist()
