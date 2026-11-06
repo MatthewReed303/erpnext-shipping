@@ -4,6 +4,7 @@ import re
 
 import frappe
 from frappe import _
+from frappe.utils import flt
 from frappe.utils.data import get_link_to_form
 
 
@@ -142,3 +143,38 @@ def update_tracking_info_daily():
 			fields = ["awb_number", "tracking_status", "tracking_status_info", "tracking_url"]
 			for field in fields:
 				shipment_doc.db_set(field, tracking_info.get(field))
+
+
+def fill_parcels_from_items(doc, method=None):
+	"""Shipment before_validate: when a draft Shipment has no parcels, add one from its items.
+
+	Weight = sum of item weight x quantity from the Delivery Notes, plus the box from the Parcel
+	Template (the Shipment's, else Starshipit's default). Size comes from the template. Nothing is
+	filled when no item has a weight; parcels can always be edited or split by hand.
+	"""
+	from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import kg_per_unit
+
+	if doc.docstatus != 0 or doc.shipment_parcel or not doc.shipment_delivery_note:
+		return
+	items_weight = 0.0
+	for row in doc.shipment_delivery_note:
+		for item in frappe.get_all(
+			"Delivery Note Item",
+			filters={"parent": row.delivery_note},
+			fields=["qty", "weight_per_unit", "weight_uom"],
+		):
+			items_weight += (kg_per_unit(item.weight_per_unit, item.weight_uom) or 0) * flt(item.qty)
+	if not items_weight:
+		return
+	template_name = doc.parcel_template or frappe.db.get_single_value("Starshipit", "default_parcel_template")
+	template = frappe.get_cached_doc("Shipment Parcel Template", template_name) if template_name else None
+	doc.append(
+		"shipment_parcel",
+		{
+			"length": template.length if template else 0,
+			"width": template.width if template else 0,
+			"height": template.height if template else 0,
+			"weight": flt(items_weight + flt(template.weight if template else 0), 3),
+			"count": 1,
+		},
+	)

@@ -16,6 +16,7 @@
   "allow_label_printing",
   "webhook_section",
   "webhook_url",
+  "webhook_secret",
   "webhook_token"
  ],
  "fields": [
@@ -75,12 +76,18 @@
    "label": "Tracking Webhook"
   },
   {
-   "description": "Paste this into Starshipit's tracking webhook (notification URL) setting, so tracking updates reach ERPNext as they happen. Keep it private: the token in it is the only check on incoming updates.",
+   "description": "Paste this into Starshipit's tracking webhook (notification URL) setting, so tracking updates reach ERPNext as they happen. Keep it private: without a Webhook Secret, the token in it is the only check on incoming updates.",
    "fieldname": "webhook_url",
    "fieldtype": "Small Text",
    "is_virtual": 1,
    "label": "Webhook URL",
    "read_only": 1
+  },
+  {
+   "description": "Optional. The secret set with the webhook in Starshipit. When set, every webhook must carry a valid X-Starshipit-Signature, and the token in the URL is no longer used.",
+   "fieldname": "webhook_secret",
+   "fieldtype": "Password",
+   "label": "Webhook Secret"
   },
   {
    "fieldname": "webhook_token",
@@ -94,7 +101,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-11-06 20:00:00.000000",
+ "modified": "2026-11-06 22:00:00.000000",
  "modified_by": "Administrator",
  "module": "ERPNext Shipping",
  "name": "Starshipit",

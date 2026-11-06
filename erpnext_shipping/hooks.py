@@ -124,6 +124,9 @@ scheduler_events = {"daily": ["erpnext_shipping.erpnext_shipping.utils.update_tr
 
 doc_events = {
 	"Shipment": {
+		"before_validate": [
+			"erpnext_shipping.erpnext_shipping.utils.fill_parcels_from_items",
+		],
 		"validate": [
 			"erpnext_shipping.erpnext_shipping.utils.validate_phone",
 		],

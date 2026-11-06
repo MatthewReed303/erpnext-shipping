@@ -228,24 +228,15 @@ def print_shipping_label(shipment: str):
 			file_url = save_label_as_attachment(shipment, content, i)
 			shipping_label.append(file_url)
 	elif service_provider == STARSHIPIT_PROVIDER:
+		from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import attach_pdf, refresh_status
+
 		labels, tracking_numbers = StarshipitUtils().print_label(shipment_doc)
-		shipping_label = []
-		for i, content in enumerate(labels, start=1):
-			# a reprint returns the same label; reuse the attachment instead of adding another copy
-			existing = frappe.db.get_value(
-				"File",
-				{
-					"attached_to_doctype": "Shipment",
-					"attached_to_name": shipment,
-					"file_name": f"label_{shipment}_{i}.pdf",
-				},
-				"file_url",
-			)
-			shipping_label.append(existing or save_label_as_attachment(shipment, content, i))
+		shipping_label = [
+			attach_pdf(shipment, "label", content, i) for i, content in enumerate(labels, start=1)
+		]
 		if tracking_numbers and not shipment_doc.awb_number:
 			shipment_doc.db_set("awb_number", ", ".join(tracking_numbers))
-		if not shipment_doc.tracking_status:
-			shipment_doc.db_set("tracking_status", "Printed")
+		refresh_status(shipment)
 		for row in shipment_doc.shipment_delivery_note:
 			for file_url in shipping_label:
 				attach_existing_file(file_url, "Delivery Note", row.delivery_note)
@@ -304,8 +295,18 @@ def update_tracking(shipment, service_provider, shipment_id, delivery_notes=None
 		sendcloud = SendCloudUtils()
 		tracking_data = sendcloud.get_tracking_data(shipment_id)
 	elif service_provider == STARSHIPIT_PROVIDER:
-		# Starshipit tracks by order number, which is the Shipment name
-		tracking_data = StarshipitUtils().get_tracking_data(shipment)
+		# Starshipit tracks by order number (the Shipment name) and writes the Shipment and its
+		# Delivery Notes itself; return what is now stored so callers don't overwrite it
+		from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import refresh_status
+
+		if not refresh_status(shipment):
+			return None
+		return frappe.db.get_value(
+			"Shipment",
+			shipment,
+			["awb_number", "tracking_status", "tracking_status_info", "tracking_url"],
+			as_dict=True,
+		)
 
 	if not tracking_data:
 		return
