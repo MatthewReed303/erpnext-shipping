@@ -53,6 +53,8 @@ UNPRINTED_STATUSES = ("", "unshipped", "saved", "new")
 # ERPNext's Shipment tracking_status only offers In Progress / Delivered / Returned / Lost,
 # so Starshipit's detailed status goes to tracking_status_info.
 DELIVERED_STATUSES = {"delivered"}
+# a cancelled shipment is not on its way, so it gets no tracking_status (the detail stays in tracking_status_info)
+NOT_IN_TRANSIT_STATUSES = UNPRINTED_STATUSES + ("cancelled",)
 
 # IANA zone -> Windows zone id, which Book Pickup expects (pickup_timezone_id)
 WINDOWS_TIMEZONES = {
@@ -261,6 +263,10 @@ class StarshipitUtils:
 		shipment_doc = frappe.get_doc("Shipment", shipment)
 		parcels = json.loads(shipment_parcel) if isinstance(shipment_parcel, str) else shipment_parcel
 		carrier_code, service_code = split_service_id(service_info)
+		if shipment_doc.get("delivery_customer") and (
+			frappe.get_cached_value("Customer", shipment_doc.delivery_customer, "customer_type") == "Individual"
+		):
+			delivery_company_name = None  # a person's name is not a company on the label
 		order = {
 			"order_number": shipment,
 			"reference": cstr(
@@ -275,19 +281,26 @@ class StarshipitUtils:
 			"packages": self.packages(parcels),
 		}
 		existing = self.find_order(shipment)
-		editable = not existing or cstr(existing.get("status")).lower() in UNPRINTED_STATUSES
-		if existing:
-			# repeated or retried: update the order already in Starshipit, never create a second one
+		if existing and cstr(existing.get("status")).lower() not in UNPRINTED_STATUSES:
+			# the label is printed, so Starshipit no longer allows changes to the order
 			order_id = existing["order_id"]
-			if editable:
-				self.request("PUT", "/orders", payload={"order": {**order, "order_id": order_id}})
+		elif existing:
+			# repeated or retried: update the order already in Starshipit, never create a second one.
+			# Update Order adds rows sent without an id, so reuse the ids and delete leftover rows.
+			order_id = existing["order_id"]
+			order.update(
+				order_id=order_id,
+				carrier=carrier_code,
+				carrier_service_code=service_code,
+				items=sync_rows(order["items"], existing.get("items"), "item_id"),
+				packages=sync_rows(order["packages"], existing.get("packages"), "package_id"),
+			)
+			self.request("PUT", "/orders", payload={"order": order})
 		else:
 			created = self.request("POST", "/orders", payload={"order": order}).get("order") or {}
 			order_id = created.get("order_id")
 			if not order_id:
 				frappe.throw(_("Starshipit did not return an order ID."), title=_("Starshipit"))
-
-		if editable:
 			# Create Order has no courier fields; the courier and service are set with Update Order
 			self.request(
 				"PUT",
@@ -373,8 +386,8 @@ class StarshipitUtils:
 			)
 		payload = {"order_id": cint(shipment_doc.shipment_id), "reprint": reprint}
 		if not reprint:
-			carrier, service_code = order.get("carrier"), order.get("carrier_service_code")
-			if not carrier or carrier == -1 or not service_code:
+			carrier, service_code = order_carrier(order), order.get("carrier_service_code")
+			if not carrier or not service_code:
 				service = self.order_service(shipment_doc)
 				carrier, service_code = service.carrier_code, service.service_code
 			payload.update(carrier=carrier, carrier_service_code=service_code)
@@ -437,7 +450,7 @@ class StarshipitUtils:
 		payload = {
 			"order_reference": shipment_doc.name,
 			"tracking_number": cstr(shipment_doc.awb_number).split(",")[0].strip(),
-			"carrier_name": order.get("carrier_name") or shipment_doc.carrier,
+			"carrier_name": order_carrier(order) or order.get("carrier_name") or shipment_doc.carrier,
 			"service_code": order.get("carrier_service_code"),
 			"pickup_timeslot_start": local_to_utc(shipment_doc.pickup_date, shipment_doc.pickup_from, zone),
 			"pickup_timeslot_end": local_to_utc(shipment_doc.pickup_date, shipment_doc.pickup_to, zone),
@@ -469,13 +482,37 @@ class StarshipitUtils:
 		tracking = {}
 		try:
 			response = self.request("GET", "/track", params={"order_number": order_number}, log_errors=False)
-			tracking = response.get("results") or {}
+			tracking = tracking_result(response.get("results"), order_number)
 		except frappe.ValidationError:
 			frappe.clear_messages()
 		return status_dict(order, tracking)
 
 
 # --- Helpers ------------------------------------------------------------------
+
+
+def sync_rows(rows: list[dict], existing: list[dict] | None, id_field: str) -> list[dict]:
+	"""Rows for Update Order that replace the order's rows: reuse ids in order, delete the rest."""
+	existing = [row for row in existing or [] if row.get(id_field)]
+	synced = [{**row, id_field: old[id_field]} for row, old in zip(rows, existing)]
+	synced += [dict(row) for row in rows[len(existing) :]]
+	synced += [{id_field: old[id_field], "delete": True} for old in existing[len(rows) :]]
+	return synced
+
+
+def order_carrier(order: dict) -> str | None:
+	"""The order's carrier code, or None while it is unset (Starshipit returns -1 then)."""
+	carrier = order.get("carrier")
+	return None if carrier in (None, "", -1, "-1") else cstr(carrier)
+
+
+def tracking_result(results, order_number: str) -> dict:
+	"""The Tracking Details for the order, whether /track returned one object or a list."""
+	if isinstance(results, dict):
+		return results
+	results = [r for r in results or [] if isinstance(r, dict)]
+	matching = [r for r in results if cstr(r.get("order_number")) == cstr(order_number)]
+	return (matching or results or [{}])[-1]
 
 
 def split_service_id(service_info: dict) -> tuple[str, str]:
@@ -572,7 +609,7 @@ def order_items(shipment_doc, description_of_content: str | None, value_of_goods
 		for item in frappe.get_all(
 			"Delivery Note Item",
 			filters={"parent": row.delivery_note},
-			fields=["item_code", "item_name", "qty", "rate", "weight_per_unit", "weight_uom"],
+			fields=["item_code", "item_name", "qty", "base_rate", "weight_per_unit", "weight_uom"],
 			order_by="idx",
 		):
 			tariff_code, origin = frappe.get_cached_value(
@@ -582,7 +619,7 @@ def order_items(shipment_doc, description_of_content: str | None, value_of_goods
 				"description": item.item_name,
 				"sku": cstr(item.item_code)[:50],
 				"quantity": flt(item.qty),
-				"value": flt(item.rate),
+				"value": flt(item.base_rate),  # company currency, as sent in "currency"
 			}
 			weight = kg_per_unit(item.weight_per_unit, item.weight_uom)
 			if weight:
@@ -611,8 +648,8 @@ def normalize_status(status: str | None) -> str:
 
 def erpnext_tracking_status(status: str | None) -> str:
 	"""Map a Starshipit status to the Shipment's tracking_status options."""
-	if cstr(status).replace(" ", "").lower() in UNPRINTED_STATUSES:
-		return ""  # no label yet, so nothing is in transit
+	if cstr(status).replace(" ", "").lower() in NOT_IN_TRANSIT_STATUSES:
+		return ""  # no label yet, or cancelled: nothing is in transit
 	return "Delivered" if cstr(status).replace(" ", "").lower() in DELIVERED_STATUSES else "In Progress"
 
 
@@ -635,8 +672,16 @@ def status_dict(order: dict, tracking: dict | None = None) -> dict:
 		"awb_number": tracking_number or "",
 		"tracking_status": erpnext_tracking_status(status),
 		"tracking_status_info": cstr(info)[:140],
-		"tracking_url": tracking.get("tracking_url") or "",
+		"tracking_url": tracking.get("tracking_url") or package_tracking_url(order),
 	}
+
+
+def package_tracking_url(order: dict) -> str:
+	for package in order.get("packages") or []:
+		url = cstr(package.get("branded_tracking_url") or package.get("tracking_url"))
+		if url.startswith("http"):
+			return url
+	return ""
 
 
 def attach_pdf(shipment: str, prefix: str, content: bytes, index: int | None = None) -> str:
@@ -824,12 +869,12 @@ def webhook(token: str | None = None):
 		"tracking_status": erpnext_tracking_status(status),
 		"tracking_status_info": normalize_status(status),
 	}
-	if not frappe.db.get_value("Shipment", shipment, "tracking_url"):
-		try:
-			fresh = StarshipitUtils().get_tracking_data(order_number) or {}
-			if fresh.get("tracking_url"):
-				data["tracking_url"] = fresh["tracking_url"]
-		except Exception:
-			frappe.log_error(title="Starshipit webhook: tracking lookup failed")
 	apply_status(shipment, data)
+	if not frappe.db.get_value("Shipment", shipment, "tracking_url"):
+		# the webhook carries no tracking URL; fetch it after answering, as Starshipit recommends
+		frappe.enqueue(
+			"erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit.refresh_status",
+			shipment=shipment,
+			enqueue_after_commit=True,
+		)
 	return {"ok": True, "matched": True}

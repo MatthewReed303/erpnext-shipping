@@ -35,6 +35,7 @@ def fetch_shipping_rates(
 	delivery_contact_name=None,
 ):
 	# Return Shipping Rates for the various Shipping Providers
+	frappe.has_permission("Shipment", "create", throw=True)
 	shipment_prices = []
 	letmeship_enabled = frappe.db.get_single_value("LetMeShip", "enabled")
 	sendcloud_enabled = frappe.db.get_single_value("SendCloud", "enabled")
@@ -116,6 +117,7 @@ def create_shipment(
 	delivery_contact_name=None,
 	delivery_notes=None,
 ):
+	frappe.get_doc("Shipment", shipment).check_permission("write")
 	if isinstance(delivery_notes, str):
 		delivery_notes = json.loads(delivery_notes)
 
@@ -213,6 +215,7 @@ def get_delivery_company_name(shipment: str) -> str | None:
 @frappe.whitelist()
 def print_shipping_label(shipment: str):
 	shipment_doc = frappe.get_doc("Shipment", shipment)
+	shipment_doc.check_permission("write")  # printing a label is charged by the courier
 	service_provider = shipment_doc.service_provider
 	shipment_id = shipment_doc.shipment_id
 
@@ -280,6 +283,7 @@ def attach_existing_file(file_url: str, doctype: str, name: str):
 
 @frappe.whitelist()
 def update_tracking(shipment, service_provider, shipment_id, delivery_notes=None):
+	frappe.get_doc("Shipment", shipment).check_permission("write")
 	if isinstance(delivery_notes, str):
 		delivery_notes = json.loads(delivery_notes)
 

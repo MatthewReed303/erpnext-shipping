@@ -21,8 +21,11 @@ from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import (
 	kg_per_unit,
 	local_to_utc,
 	normalize_status,
+	order_carrier,
 	split_service_id,
 	status_dict,
+	sync_rows,
+	tracking_result,
 	valid_signature,
 )
 
@@ -108,6 +111,41 @@ class TestStarshipitHelpers(UnitTestCase):
 		self.assertEqual(delivered["tracking_status"], "Delivered")
 		self.assertEqual(delivered["tracking_status_info"], "Delivered: Signed for")
 		self.assertEqual((delivered["awb_number"], delivered["tracking_url"]), ("TN1", "https://t/TN1"))
+
+	def test_cancelled_is_not_in_transit(self):
+		self.assertEqual(erpnext_tracking_status("Cancelled"), "")
+		self.assertEqual(erpnext_tracking_status("Exception"), "In Progress")
+
+	def test_sync_rows_reuses_ids_and_deletes_leftovers(self):
+		# Update Order adds rows sent without an id, so a retry must reuse the existing ids
+		existing = [{"package_id": 1, "weight": 0.5}, {"package_id": 2, "weight": 0.7}]
+		self.assertEqual(
+			sync_rows([{"weight": 0.9}], existing, "package_id"),
+			[{"weight": 0.9, "package_id": 1}, {"package_id": 2, "delete": True}],
+		)
+		self.assertEqual(
+			sync_rows([{"weight": 0.9}, {"weight": 1.1}], existing[:1], "package_id"),
+			[{"weight": 0.9, "package_id": 1}, {"weight": 1.1}],
+		)
+		self.assertEqual(sync_rows([{"weight": 1}], None, "package_id"), [{"weight": 1}])
+
+	def test_tracking_result_object_or_list(self):
+		# /track documents "results" as a list but returns a single object
+		self.assertEqual(tracking_result({"tracking_status": "Delivered"}, "S1"), {"tracking_status": "Delivered"})
+		results = [{"order_number": "S2", "tracking_status": "Printed"}, {"order_number": "S1", "tracking_status": "InTransit"}]
+		self.assertEqual(tracking_result(results, "S1")["tracking_status"], "InTransit")
+		self.assertEqual(tracking_result(None, "S1"), {})
+
+	def test_order_carrier_unset_is_none(self):
+		self.assertIsNone(order_carrier({"carrier": -1}))
+		self.assertIsNone(order_carrier({}))
+		self.assertEqual(order_carrier({"carrier": "CourierPost"}), "CourierPost")
+
+	def test_tracking_url_from_packages(self):
+		order = {"status": "Printed", "packages": [{"tracking_number": "T1", "tracking_url": "https://track/T1"}]}
+		self.assertEqual(status_dict(order)["tracking_url"], "https://track/T1")
+		order["packages"][0]["tracking_url"] = "not-a-url"
+		self.assertEqual(status_dict(order)["tracking_url"], "")
 
 	def test_split_service_id(self):
 		self.assertEqual(split_service_id({"service_id": "NZPost|CPOLP"}), ("NZPost", "CPOLP"))
@@ -278,14 +316,63 @@ class TestStarshipit(IntegrationTestCase):
 
 	@patch(REQUESTS)
 	def test_repeat_create_updates_instead_of_duplicating(self, request):
+		existing = {
+			"order_id": 555,
+			"status": "Saved",
+			"items": [{"item_id": 71, "sku": "OLD"}],
+			"packages": [{"package_id": 81, "weight": 0.5}, {"package_id": 82, "weight": 0.5}],
+		}
 		request.side_effect = [
-			response({"order": {"order_id": 555, "status": "Saved"}, "success": True}),
-			response({"order": {"order_id": 555}, "success": True}),
+			response({"order": existing, "success": True}),
 			response({"order": {"order_id": 555}, "success": True}),
 		]
 		info = self.create(request, self.shipment())
-		self.assertEqual(calls(request), [("GET", "/orders"), ("PUT", "/orders"), ("PUT", "/orders")])
+		# one update that replaces rows by id (rows without an id would be added) and sets the courier
+		self.assertEqual(calls(request), [("GET", "/orders"), ("PUT", "/orders")])
+		order = request.call_args.kwargs["json"]["order"]
+		self.assertEqual((order["order_id"], order["carrier"], order["carrier_service_code"]), (555, "PlainLabel", "Plain Label"))
+		self.assertEqual([row.get("item_id") for row in order["items"]], [71])
+		self.assertEqual(
+			order["packages"],
+			[
+				{"name": "Parcel 1", "weight": 0.8, "length": 0.2, "width": 0.15, "height": 0.1, "package_id": 81},
+				{"package_id": 82, "delete": True},
+			],
+		)
 		self.assertEqual(info["shipment_id"], "555")
+
+	@patch(REQUESTS)
+	def test_individual_customer_has_no_company(self, request):
+		if not frappe.db.exists("Customer", "_Test Starshipit Person"):
+			frappe.get_doc(
+				{"doctype": "Customer", "customer_name": "_Test Starshipit Person", "customer_type": "Individual"}
+			).insert(ignore_permissions=True)
+		request.side_effect = [
+			not_found(),
+			response({"order": {"order_id": 9}, "success": True}),
+			response({"order": {"order_id": 9}, "success": True}),
+		]
+		self.create(request, self.shipment(delivery_to_type="Customer", delivery_customer="_Test Starshipit Person"))
+		order = request.call_args_list[1].kwargs["json"]["order"]
+		self.assertEqual(order["destination"]["company"], "")
+		self.assertEqual(order["destination"]["name"], "Ann Lee")
+
+	def test_label_and_rates_need_shipment_permission(self):
+		from erpnext_shipping.erpnext_shipping.shipping import fetch_shipping_rates, print_shipping_label
+
+		shipment = self.shipment(service_provider=STARSHIPIT_PROVIDER, shipment_id="1")
+		original_get_doc = frappe.get_doc
+		frappe.set_user("Guest")
+		self.addCleanup(frappe.set_user, "Administrator")
+		with patch(
+			"frappe.get_doc",
+			side_effect=lambda *a, **k: shipment if a and a[0] == "Shipment" else original_get_doc(*a, **k),
+		), patch(REQUESTS) as request:
+			with self.assertRaises(frappe.PermissionError):
+				print_shipping_label("SHIP-TEST-1")
+			with self.assertRaises(frappe.PermissionError):
+				fetch_shipping_rates("Company", "Customer", "A", "B", "[]", "x", "2026-11-10", 1)
+			request.assert_not_called()
 
 	@patch(REQUESTS)
 	def test_repeat_create_leaves_printed_order_alone(self, request):
@@ -396,6 +483,7 @@ class TestStarshipit(IntegrationTestCase):
 					"order": {
 						"order_id": 654,
 						"status": "Printed",
+						"carrier": "Fastways",
 						"carrier_name": "Aramex",
 						"carrier_service_code": "P",
 						"sender_details": {
@@ -432,7 +520,8 @@ class TestStarshipit(IntegrationTestCase):
 		self.assertEqual(StarshipitUtils().book_pickup(shipment, "Side door"), "4500")
 		self.assertEqual(calls(request)[-1], ("POST", "/pickup/book"))
 		payload = request.call_args.kwargs["json"]
-		self.assertEqual(payload["carrier_name"], "Aramex")
+		# the carrier enum code; Book Pickup also accepts the display name, the code is unambiguous
+		self.assertEqual(payload["carrier_name"], "Fastways")
 		self.assertEqual(payload["tracking_number"], "TN9")
 		self.assertEqual(payload["pickup_timeslot_start"], "2026-11-09T20:00:00Z")
 		self.assertEqual(payload["pickup_timeslot_end"], "2026-11-09T23:00:00Z")
