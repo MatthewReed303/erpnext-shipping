@@ -946,6 +946,12 @@ class TestStarshipitStore(IntegrationTestCase):
 		self.assertEqual(get_all.call_args.kwargs["filters"]["external_id"], "SHIP-TEST-1")
 		sync.assert_called_once_with("FUL-TEST-1")
 
+	def test_shipment_names_the_pickup_contact(self):
+		shipment = frappe._dict()
+		self.si.set_pickup_contact(shipment, "Administrator")
+		self.assertIn(frappe.db.get_value("User", "Administrator", "first_name"), shipment.pickup_contact)
+		self.assertEqual(shipment.pickup_contact_email, frappe.db.get_value("User", "Administrator", "email"))
+
 	def test_order_status_follows_the_shipment(self):
 		shipment = frappe._dict(
 			docstatus=1,

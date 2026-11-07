@@ -323,6 +323,7 @@ def create_shipment_for_order(order_name: str) -> str:
 	shipment.pickup_from_type = "Company"
 	shipment.pickup_address_name = s.sender_address
 	shipment.pickup_contact_person = s.pickup_contact
+	set_pickup_contact(shipment, s.pickup_contact)
 	shipment.pickup_date = next_business_day()
 	shipment.description_of_content = s.get("content_description") or _("Goods")
 	shipment.parcel_template = None
@@ -336,6 +337,24 @@ def create_shipment_for_order(order_name: str) -> str:
 			"Info", _("The customer chose {0} at checkout.").format(frappe.bold(choice.get("label") or ""))
 		)
 	return shipment.name
+
+
+def set_pickup_contact(shipment, user: str | None) -> None:
+	"""The pickup contact's details on the Shipment, as its form fills them from the user."""
+	if not user:
+		return
+	contact = frappe.db.get_value(
+		"User", user, ["first_name", "last_name", "email", "phone", "mobile_no"], as_dict=True
+	)
+	if not contact:
+		return
+	lines = [
+		" ".join(filter(None, [contact.first_name, contact.last_name])),
+		contact.email,
+		contact.phone or contact.mobile_no,
+	]
+	shipment.pickup_contact = "<br>".join(filter(None, lines))
+	shipment.pickup_contact_email = contact.email
 
 
 def pickup_phone_valid() -> bool:
