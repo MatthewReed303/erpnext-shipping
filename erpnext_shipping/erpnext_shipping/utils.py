@@ -170,6 +170,7 @@ def fill_parcels_from_items(doc, method=None):
 			) or (None, 0)
 			lines.append(
 				frappe._dict(
+					item_code=item.item_code,
 					qty=flt(item.stock_qty),  # weight_per_unit is per stock unit
 					kg=kg_per_unit(item.weight_per_unit, item.weight_uom) or 0,
 					template=template,
@@ -202,8 +203,13 @@ def parcels_for_items(lines: list[dict], shipment_template: str | None, default_
 		if line.own_box:
 			template = box(line.template or default_template)
 			own = parcel(template, flt(line.kg), max(ceil(flt(line.qty)), 1))
-			if own["weight"] > 0:
-				parcels.append(own)
+			if own["weight"] <= 0:
+				frappe.throw(
+					_("Set a weight for {0}, or for its Parcel Template, so its parcels can be priced.").format(
+						frappe.bold(line.get("item_code") or _("an item shipped in its own box"))
+					)
+				)
+			parcels.append(own)
 			continue
 		shared_kg += flt(line.kg) * flt(line.qty)
 		if line.template:

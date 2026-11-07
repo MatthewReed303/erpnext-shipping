@@ -62,7 +62,11 @@ def checkout_rates(context) -> dict | None:
 				)
 			],
 		}
-	parcels = parcels_for_items(lines, None, s.default_parcel_template)
+	try:
+		parcels = parcels_for_items(lines, None, s.default_parcel_template)
+	except frappe.ValidationError:
+		frappe.clear_messages()
+		parcels = []
 	if not parcels:
 		frappe.log_error(title="Store shipping: items have no weight", message=json.dumps(context.cart_items))
 		return {
@@ -161,6 +165,7 @@ def cart_lines(items: list[dict]) -> tuple[list[dict], list[str]]:
 			continue  # a service, not something in the parcel
 		lines.append(
 			frappe._dict(
+				item_code=row["item_code"],
 				qty=flt(row["qty"]),
 				kg=kg_per_unit(item.weight_per_unit, item.weight_uom) or 0,
 				template=item.get("shipping_parcel_template"),

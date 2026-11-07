@@ -700,9 +700,11 @@ class TestStarshipit(IntegrationTestCase):
 			parcels_for_items([{"qty": 1, "kg": 0.5}], None, large),
 			[{"length": 40, "width": 30, "height": 20, "weight": 0.8, "count": 1}],
 		)
-		# nothing weighable: no parcel (ERPNext refuses 0 kg parcels)
-		self.assertEqual(parcels_for_items([{"qty": 1, "kg": 0, "own_box": 1}], None, None), [])
+		# nothing to weigh in the shared parcel: no parcel (ERPNext refuses 0 kg parcels)
 		self.assertEqual(parcels_for_items([{"qty": 1, "kg": 0}], None, large), [])
+		# an own-box item without any weight can't be priced, so it is not left out quietly
+		with self.assertRaises(frappe.ValidationError):
+			parcels_for_items([{"item_code": "X", "qty": 1, "kg": 0, "own_box": 1}], None, None)
 
 	def test_parcel_weight_keeps_grams(self):
 		self.assertEqual(frappe.get_meta("Shipment Parcel").get_field("weight").precision, "3")
