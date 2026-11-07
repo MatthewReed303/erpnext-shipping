@@ -824,6 +824,23 @@ class TestStarshipitStore(IntegrationTestCase):
 		self.assertIsNone(self.si.checkout_rates(self.context()))
 
 	@patch(REQUESTS)
+	def test_nothing_to_send_asks_nothing(self, request):
+		if not frappe.db.exists("Item", "_Test Starshipit Service"):
+			frappe.get_doc(
+				{
+					"doctype": "Item",
+					"item_code": "_Test Starshipit Service",
+					"item_name": "_Test Starshipit Service",
+					"item_group": "All Item Groups",
+					"stock_uom": "Nos",
+					"is_stock_item": 0,
+				}
+			).insert(ignore_permissions=True)
+		items = [{"item_code": "_Test Starshipit Service", "qty": 1, "rate": 80}]
+		self.assertIsNone(self.si.checkout_rates(self.context(items=items)))
+		request.assert_not_called()
+
+	@patch(REQUESTS)
 	def test_rates_from_starshipit_are_cached(self, request):
 		request.return_value = response(
 			{

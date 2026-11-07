@@ -53,6 +53,8 @@ def checkout_rates(context) -> dict | None:
 	address = context.address
 	sender = sender_address()
 	lines, restricted = cart_lines(context.cart_items)
+	if not lines:
+		return None  # nothing in the cart is sent
 	if address.country and address.country != sender.country and restricted:
 		return {
 			"options": [],
