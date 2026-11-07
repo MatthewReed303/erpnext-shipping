@@ -935,6 +935,17 @@ class TestStarshipitStore(IntegrationTestCase):
 		self.assertNotIn("tracking_status", set_value.call_args.args[2])
 		self.assertEqual(update.call_args.kwargs["tracking_info"], stored)
 
+	def test_store_fulfilment_follows_a_status_update_at_once(self):
+		if "shop" not in frappe.get_installed_apps():
+			self.skipTest("Shop is not installed")
+		with (
+			patch("frappe.get_all", return_value=["FUL-TEST-1"]) as get_all,
+			patch("shop.fulfillment.service.sync") as sync,
+		):
+			self.si.sync_store_fulfillment("SHIP-TEST-1")
+		self.assertEqual(get_all.call_args.kwargs["filters"]["external_id"], "SHIP-TEST-1")
+		sync.assert_called_once_with("FUL-TEST-1")
+
 	def test_order_status_follows_the_shipment(self):
 		shipment = frappe._dict(
 			docstatus=1,

@@ -272,6 +272,25 @@ class StarshipitFulfillment(FulfillmentProvider):
 		return {"status": "Cancelled"}
 
 
+def sync_store_fulfillment(shipment: str) -> None:
+	"""Bring the store's fulfilment of a Shipment up to date when Starshipit has news of it, so the
+	customer hears it has shipped or arrived without waiting for Shop's hourly sync."""
+	if "shop" not in frappe.get_installed_apps():
+		return
+	from shop.fulfillment import service
+
+	for name in frappe.get_all(
+		"Shop Fulfillment",
+		filters={
+			"provider": StarshipitFulfillment.key,
+			"external_id": shipment,
+			"status": ["in", ("Pending", "Accepted", "Shipped")],
+		},
+		pluck="name",
+	):
+		service.sync(name)
+
+
 def return_note(delivery_note: str) -> str:
 	"""ERPNext's return Delivery Note for what an invoiced Delivery Note sent, so the stock is back."""
 	from erpnext.stock.doctype.delivery_note.delivery_note import make_sales_return

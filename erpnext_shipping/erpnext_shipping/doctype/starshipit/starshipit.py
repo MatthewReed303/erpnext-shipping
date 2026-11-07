@@ -807,9 +807,12 @@ def get_starshipit_shipment(shipment: str):
 
 
 def refresh_status(shipment: str) -> dict | None:
+	from erpnext_shipping.erpnext_shipping.shop_integration import sync_store_fulfillment
+
 	data = StarshipitUtils().get_tracking_data(shipment)
 	if data:
 		apply_status(shipment, data)
+		sync_store_fulfillment(shipment)
 	return data
 
 
@@ -935,11 +938,10 @@ def webhook(token: str | None = None):
 		"tracking_status_info": normalize_status(status),
 	}
 	apply_status(shipment, data)
+	# the store's fulfilment follows (refresh_status does it once the tracking URL is in)
+	method = "erpnext_shipping.erpnext_shipping.shop_integration.sync_store_fulfillment"
 	if not frappe.db.get_value("Shipment", shipment, "tracking_url"):
 		# the webhook carries no tracking URL; fetch it after answering, as Starshipit recommends
-		frappe.enqueue(
-			"erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit.refresh_status",
-			shipment=shipment,
-			enqueue_after_commit=True,
-		)
+		method = "erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit.refresh_status"
+	frappe.enqueue(method, shipment=shipment, enqueue_after_commit=True)
 	return {"ok": True, "matched": True}
