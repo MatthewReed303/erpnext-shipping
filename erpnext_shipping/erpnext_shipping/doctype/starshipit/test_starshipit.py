@@ -979,3 +979,12 @@ class TestStarshipitStore(IntegrationTestCase):
 		):
 			marked = self.si.mark_preferred(services, "SHIP-X")
 		self.assertEqual([s.get("is_preferred") for s in marked], [None, 1])
+
+
+class TestInstall(IntegrationTestCase):
+	def test_variants_get_the_items_shipping_fields(self):
+		from erpnext_shipping.install import copy_to_variants
+
+		copy_to_variants(("shipping_parcel_template", "ships_in_own_box", "ships_domestic_only"))
+		copied = {row.field_name for row in frappe.get_single("Item Variant Settings").fields}
+		self.assertTrue({"shipping_parcel_template", "ships_in_own_box", "ships_domestic_only"} <= copied)
