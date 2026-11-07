@@ -249,8 +249,8 @@ class StarshipitFulfillment(FulfillmentProvider):
 		return result
 
 	def cancel(self, fulfillment) -> dict:
-		"""Cancel the Shipment (and its Starshipit order) and the unbilled Delivery Notes made for it,
-		so the stock is back."""
+		"""Cancel the Shipment (and its Starshipit order) and put the stock back: an unbilled Delivery
+		Note is cancelled, an invoiced one is returned with ERPNext's return Delivery Note."""
 		name = fulfillment.external_id
 		if name and frappe.db.exists("Shipment", name):
 			doc = frappe.get_doc("Shipment", name)
@@ -262,10 +262,25 @@ class StarshipitFulfillment(FulfillmentProvider):
 				doc.cancel()  # also deletes or archives the Starshipit order
 			for note in notes:
 				note_doc = frappe.get_doc("Delivery Note", note)
-				if note_doc.docstatus == 1 and not flt(note_doc.per_billed):
+				if note_doc.docstatus != 1:
+					continue
+				if not flt(note_doc.per_billed):
 					note_doc.flags.ignore_permissions = True
 					note_doc.cancel()
+				else:
+					return_note(note)
 		return {"status": "Cancelled"}
+
+
+def return_note(delivery_note: str) -> str:
+	"""ERPNext's return Delivery Note for what an invoiced Delivery Note sent, so the stock is back."""
+	from erpnext.stock.doctype.delivery_note.delivery_note import make_sales_return
+
+	returned = make_sales_return(delivery_note)
+	returned.flags.ignore_permissions = True
+	returned.insert(ignore_permissions=True)
+	returned.submit()
+	return returned.name
 
 
 def create_shipment_for_order(order_name: str) -> str:

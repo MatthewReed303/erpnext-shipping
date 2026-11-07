@@ -785,7 +785,14 @@ def apply_status(shipment_name: str, data: dict):
 		"Shipment Delivery Note", filters={"parent": shipment_name}, pluck="delivery_note"
 	)
 	if delivery_notes:
-		update_delivery_note(delivery_notes=delivery_notes, tracking_info=data)
+		# the Delivery Notes show what the Shipment now has, never an older status
+		stored = frappe.db.get_value(
+			"Shipment",
+			shipment_name,
+			["awb_number", "tracking_url", "tracking_status", "tracking_status_info"],
+			as_dict=True,
+		)
+		update_delivery_note(delivery_notes=delivery_notes, tracking_info=stored)
 
 
 # --- Shipment actions (form buttons) ------------------------------------------

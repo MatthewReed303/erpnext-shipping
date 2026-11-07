@@ -909,6 +909,32 @@ class TestStarshipitStore(IntegrationTestCase):
 		self.assertIn("_Test Starshipit Battery", result["messages"][0])
 		request.assert_not_called()
 
+	def test_a_late_event_does_not_move_a_delivered_parcel_back(self):
+		from erpnext_shipping.erpnext_shipping.doctype.starshipit import starshipit
+
+		stored = frappe._dict(
+			awb_number="TRACK1",
+			tracking_url="https://track/1",
+			tracking_status="Delivered",
+			tracking_status_info="Delivered",
+		)
+
+		def get_value(doctype, name, fields, *args, **kwargs):
+			return stored.tracking_status if fields == "tracking_status" else stored
+
+		with (
+			patch("frappe.db.get_value", side_effect=get_value),
+			patch("frappe.db.set_value") as set_value,
+			patch("frappe.get_all", return_value=["DN-TEST-1"]),
+			patch("erpnext_shipping.erpnext_shipping.shipping.update_delivery_note") as update,
+		):
+			starshipit.apply_status(
+				"SHIP-TEST-1",
+				{"tracking_status": "In Progress", "tracking_status_info": "In Transit", "awb_number": ""},
+			)
+		self.assertNotIn("tracking_status", set_value.call_args.args[2])
+		self.assertEqual(update.call_args.kwargs["tracking_info"], stored)
+
 	def test_order_status_follows_the_shipment(self):
 		shipment = frappe._dict(
 			docstatus=1,
