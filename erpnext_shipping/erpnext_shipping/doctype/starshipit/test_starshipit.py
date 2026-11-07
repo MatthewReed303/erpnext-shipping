@@ -131,8 +131,13 @@ class TestStarshipitHelpers(UnitTestCase):
 
 	def test_tracking_result_object_or_list(self):
 		# /track documents "results" as a list but returns a single object
-		self.assertEqual(tracking_result({"tracking_status": "Delivered"}, "S1"), {"tracking_status": "Delivered"})
-		results = [{"order_number": "S2", "tracking_status": "Printed"}, {"order_number": "S1", "tracking_status": "InTransit"}]
+		self.assertEqual(
+			tracking_result({"tracking_status": "Delivered"}, "S1"), {"tracking_status": "Delivered"}
+		)
+		results = [
+			{"order_number": "S2", "tracking_status": "Printed"},
+			{"order_number": "S1", "tracking_status": "InTransit"},
+		]
 		self.assertEqual(tracking_result(results, "S1")["tracking_status"], "InTransit")
 		self.assertEqual(tracking_result(None, "S1"), {})
 
@@ -142,7 +147,10 @@ class TestStarshipitHelpers(UnitTestCase):
 		self.assertEqual(order_carrier({"carrier": "CourierPost"}), "CourierPost")
 
 	def test_tracking_url_from_packages(self):
-		order = {"status": "Printed", "packages": [{"tracking_number": "T1", "tracking_url": "https://track/T1"}]}
+		order = {
+			"status": "Printed",
+			"packages": [{"tracking_number": "T1", "tracking_url": "https://track/T1"}],
+		}
 		self.assertEqual(status_dict(order)["tracking_url"], "https://track/T1")
 		order["packages"][0]["tracking_url"] = "not-a-url"
 		self.assertEqual(status_dict(order)["tracking_url"], "")
@@ -208,7 +216,7 @@ class TestStarshipit(IntegrationTestCase):
 				shipment=shipment.name,
 				pickup_address=address(),
 				pickup_contact=frappe._dict(
-					first_name="Mat", last_name="Reed", email_id="a@b.nz", phone="+6421"
+					first_name="Sam", last_name="Taylor", email_id="a@b.nz", phone="+6421"
 				),
 				delivery_address=address(address_line1="5 High St", city="Dunedin", pincode="9016"),
 				delivery_contact=frappe._dict(first_name="Ann", last_name="Lee", email_id="ann@example.com"),
@@ -302,7 +310,7 @@ class TestStarshipit(IntegrationTestCase):
 		self.assertEqual(order["shipping_method"], "Plain Label - My Carrier")
 		self.assertEqual(order["destination"]["name"], "Ann Lee")
 		self.assertEqual(order["destination"]["company"], "Lee Farms")
-		self.assertEqual(order["sender_details"]["name"], "Mat Reed")
+		self.assertEqual(order["sender_details"]["name"], "Sam Taylor")
 		self.assertEqual(order["items"][0]["description"], "IoT controller")
 		self.assertEqual(
 			order["packages"],
@@ -330,12 +338,22 @@ class TestStarshipit(IntegrationTestCase):
 		# one update that replaces rows by id (rows without an id would be added) and sets the courier
 		self.assertEqual(calls(request), [("GET", "/orders"), ("PUT", "/orders")])
 		order = request.call_args.kwargs["json"]["order"]
-		self.assertEqual((order["order_id"], order["carrier"], order["carrier_service_code"]), (555, "PlainLabel", "Plain Label"))
+		self.assertEqual(
+			(order["order_id"], order["carrier"], order["carrier_service_code"]),
+			(555, "PlainLabel", "Plain Label"),
+		)
 		self.assertEqual([row.get("item_id") for row in order["items"]], [71])
 		self.assertEqual(
 			order["packages"],
 			[
-				{"name": "Parcel 1", "weight": 0.8, "length": 0.2, "width": 0.15, "height": 0.1, "package_id": 81},
+				{
+					"name": "Parcel 1",
+					"weight": 0.8,
+					"length": 0.2,
+					"width": 0.15,
+					"height": 0.1,
+					"package_id": 81,
+				},
 				{"package_id": 82, "delete": True},
 			],
 		)
@@ -345,14 +363,20 @@ class TestStarshipit(IntegrationTestCase):
 	def test_individual_customer_has_no_company(self, request):
 		if not frappe.db.exists("Customer", "_Test Starshipit Person"):
 			frappe.get_doc(
-				{"doctype": "Customer", "customer_name": "_Test Starshipit Person", "customer_type": "Individual"}
+				{
+					"doctype": "Customer",
+					"customer_name": "_Test Starshipit Person",
+					"customer_type": "Individual",
+				}
 			).insert(ignore_permissions=True)
 		request.side_effect = [
 			not_found(),
 			response({"order": {"order_id": 9}, "success": True}),
 			response({"order": {"order_id": 9}, "success": True}),
 		]
-		self.create(request, self.shipment(delivery_to_type="Customer", delivery_customer="_Test Starshipit Person"))
+		self.create(
+			request, self.shipment(delivery_to_type="Customer", delivery_customer="_Test Starshipit Person")
+		)
 		order = request.call_args_list[1].kwargs["json"]["order"]
 		self.assertEqual(order["destination"]["company"], "")
 		self.assertEqual(order["destination"]["name"], "Ann Lee")
@@ -364,10 +388,15 @@ class TestStarshipit(IntegrationTestCase):
 		original_get_doc = frappe.get_doc
 		frappe.set_user("Guest")
 		self.addCleanup(frappe.set_user, "Administrator")
-		with patch(
-			"frappe.get_doc",
-			side_effect=lambda *a, **k: shipment if a and a[0] == "Shipment" else original_get_doc(*a, **k),
-		), patch(REQUESTS) as request:
+		with (
+			patch(
+				"frappe.get_doc",
+				side_effect=lambda *a, **k: (
+					shipment if a and a[0] == "Shipment" else original_get_doc(*a, **k)
+				),
+			),
+			patch(REQUESTS) as request,
+		):
 			with self.assertRaises(frappe.PermissionError):
 				print_shipping_label("SHIP-TEST-1")
 			with self.assertRaises(frappe.PermissionError):
@@ -376,10 +405,29 @@ class TestStarshipit(IntegrationTestCase):
 
 	@patch(REQUESTS)
 	def test_repeat_create_leaves_printed_order_alone(self, request):
-		request.side_effect = [response({"order": {"order_id": 556, "status": "Printed"}, "success": True})]
+		printed = {
+			"order_id": 556,
+			"status": "Printed",
+			"carrier": "PlainLabel",
+			"carrier_service_code": "Plain Label",
+		}
+		request.side_effect = [response({"order": printed, "success": True})]
 		info = self.create(request, self.shipment())
 		self.assertEqual(calls(request), [("GET", "/orders")])
 		self.assertEqual(info["shipment_id"], "556")
+		# another service can't be set once the label is printed
+		request.side_effect = [
+			response({"order": dict(printed, carrier_service_code="Express"), "success": True})
+		]
+		with self.assertRaises(frappe.ValidationError):
+			self.create(request, self.shipment())
+
+	@patch(REQUESTS)
+	def test_a_failed_lookup_is_not_taken_for_a_missing_order(self, request):
+		request.side_effect = [response({"success": False}, status=503)]
+		with self.assertRaises(frappe.ValidationError):
+			self.create(request, self.shipment())
+		self.assertEqual(calls(request), [("GET", "/orders")])
 
 	@patch(REQUESTS)
 	def test_label_refused_unless_allowed(self, request):
@@ -487,7 +535,7 @@ class TestStarshipit(IntegrationTestCase):
 						"carrier_name": "Aramex",
 						"carrier_service_code": "P",
 						"sender_details": {
-							"name": "Mat",
+							"name": "Sam",
 							"street": "1 Queen Street",
 							"city": "Auckland",
 							"post_code": "1010",
@@ -692,16 +740,31 @@ class TestStarshipitStore(IntegrationTestCase):
 		name = "_Test Starshipit Sender-Shipping"
 		if not frappe.db.exists("Address", name):
 			frappe.get_doc(
-				{"doctype": "Address", "address_title": "_Test Starshipit Sender", "address_type": "Shipping",
-				 "address_line1": "1 Queen Street", "city": "Auckland", "pincode": "1010", "country": "New Zealand"}
+				{
+					"doctype": "Address",
+					"address_title": "_Test Starshipit Sender",
+					"address_type": "Shipping",
+					"address_line1": "1 Queen Street",
+					"city": "Auckland",
+					"pincode": "1010",
+					"country": "New Zealand",
+				}
 			).insert(ignore_permissions=True)
 		return name
 
 	def weighed_item(self, code: str, kg: float, domestic_only: int = 0) -> str:
 		if not frappe.db.exists("Item", code):
 			frappe.get_doc(
-				{"doctype": "Item", "item_code": code, "item_name": code, "item_group": "All Item Groups",
-				 "stock_uom": "Nos", "is_stock_item": 1, "weight_per_unit": kg, "weight_uom": "Kg"}
+				{
+					"doctype": "Item",
+					"item_code": code,
+					"item_name": code,
+					"item_group": "All Item Groups",
+					"stock_uom": "Nos",
+					"is_stock_item": 1,
+					"weight_per_unit": kg,
+					"weight_uom": "Kg",
+				}
 			).insert(ignore_permissions=True)
 		frappe.db.set_value("Item", code, "ships_domestic_only", domestic_only)
 		return code
@@ -709,9 +772,18 @@ class TestStarshipitStore(IntegrationTestCase):
 	def context(self, country="New Zealand", code="nz", items=None):
 		return frappe._dict(
 			cart_items=items or [{"item_code": self.item, "qty": 2, "rate": 100}],
-			address=frappe._dict(address_line1="5 High St", address_line2="", city="Dunedin", state="",
-								 pincode="9016", country=country, country_code=code.upper()),
-			subtotal=200, company=frappe.db.get_value("Company", {}, "name"), currency="NZD",
+			address=frappe._dict(
+				address_line1="5 High St",
+				address_line2="",
+				city="Dunedin",
+				state="",
+				pincode="9016",
+				country=country,
+				country_code=code.upper(),
+			),
+			subtotal=200,
+			company=frappe.db.get_value("Company", {}, "name"),
+			currency="NZD",
 		)
 
 	def test_switched_off_returns_nothing(self):
@@ -722,10 +794,25 @@ class TestStarshipitStore(IntegrationTestCase):
 	@patch(REQUESTS)
 	def test_rates_from_starshipit_are_cached(self, request):
 		request.return_value = response(
-			{"services": [
-				{"carrier": "CourierPost", "carrier_name": "NZ Post Domestic", "service_name": "Parcel Post", "service_code": "CPOLP", "total_price": 9.5},
-				{"carrier": "CourierPost", "carrier_name": "NZ Post Domestic", "service_name": "Courier", "service_code": "CPOLE", "total_price": 12.0},
-			], "success": True}
+			{
+				"services": [
+					{
+						"carrier": "CourierPost",
+						"carrier_name": "NZ Post Domestic",
+						"service_name": "Parcel Post",
+						"service_code": "CPOLP",
+						"total_price": 9.5,
+					},
+					{
+						"carrier": "CourierPost",
+						"carrier_name": "NZ Post Domestic",
+						"service_name": "Courier",
+						"service_code": "CPOLE",
+						"total_price": 12.0,
+					},
+				],
+				"success": True,
+			}
 		)
 		result = self.si.checkout_rates(self.context())
 		self.assertEqual([o["amount"] for o in result["options"]], [9.5, 12.0])
@@ -741,10 +828,25 @@ class TestStarshipitStore(IntegrationTestCase):
 		frappe.db.set_single_value("Starshipit", "checkout_services", "CPOLE")
 		frappe.clear_cache(doctype="Starshipit")
 		request.return_value = response(
-			{"services": [
-				{"carrier": "CourierPost", "carrier_name": "NZ Post Domestic", "service_name": "Parcel Post", "service_code": "CPOLP", "total_price": 9.5},
-				{"carrier": "CourierPost", "carrier_name": "NZ Post Domestic", "service_name": "Courier", "service_code": "CPOLE", "total_price": 12.0},
-			], "success": True}
+			{
+				"services": [
+					{
+						"carrier": "CourierPost",
+						"carrier_name": "NZ Post Domestic",
+						"service_name": "Parcel Post",
+						"service_code": "CPOLP",
+						"total_price": 9.5,
+					},
+					{
+						"carrier": "CourierPost",
+						"carrier_name": "NZ Post Domestic",
+						"service_name": "Courier",
+						"service_code": "CPOLE",
+						"total_price": 12.0,
+					},
+				],
+				"success": True,
+			}
 		)
 		options = self.si.checkout_rates(self.context())["options"]
 		self.assertEqual([o["meta"]["service_code"] for o in options], ["CPOLE"])
@@ -759,7 +861,14 @@ class TestStarshipitStore(IntegrationTestCase):
 		request.assert_not_called()
 
 	def test_order_status_follows_the_shipment(self):
-		shipment = frappe._dict(docstatus=1, awb_number="", carrier="NZ Post", tracking_url="", tracking_status="", tracking_status_info="")
+		shipment = frappe._dict(
+			docstatus=1,
+			awb_number="",
+			carrier="NZ Post",
+			tracking_url="",
+			tracking_status="",
+			tracking_status_info="",
+		)
 		fulfillment = frappe._dict(external_id="SHIP-X", status="Accepted")
 		provider = self.si.StarshipitFulfillment()
 		for tracking_status, info, expected in (
@@ -770,16 +879,28 @@ class TestStarshipitStore(IntegrationTestCase):
 			("Delivered", "Delivered", "Delivered"),
 		):
 			shipment.update(tracking_status=tracking_status, tracking_status_info=info)
-			with patch("frappe.db.exists", return_value=True), patch("frappe.db.get_value", return_value=shipment):
+			with (
+				patch("frappe.db.exists", return_value=True),
+				patch("frappe.db.get_value", return_value=shipment),
+			):
 				self.assertEqual(provider.fetch_status(fulfillment)["status"], expected, info)
 
 	def test_customers_choice_is_marked(self):
 		services = [
-			{"service_provider": STARSHIPIT_PROVIDER, "service_id": "CourierPost|CPOLP", "service_name": "Parcel Post"},
-			{"service_provider": STARSHIPIT_PROVIDER, "service_id": "CourierPost|CPOLE", "service_name": "Courier"},
+			{
+				"service_provider": STARSHIPIT_PROVIDER,
+				"service_id": "CourierPost|CPOLP",
+				"service_name": "Parcel Post",
+			},
+			{
+				"service_provider": STARSHIPIT_PROVIDER,
+				"service_id": "CourierPost|CPOLE",
+				"service_name": "Courier",
+			},
 		]
-		with patch("frappe.db.exists", return_value=True), patch(
-			"frappe.db.get_value", return_value=json.dumps({"service_id": "CourierPost|CPOLE"})
+		with (
+			patch("frappe.db.exists", return_value=True),
+			patch("frappe.db.get_value", return_value=json.dumps({"service_id": "CourierPost|CPOLE"})),
 		):
 			marked = self.si.mark_preferred(services, "SHIP-X")
 		self.assertEqual([s.get("is_preferred") for s in marked], [None, 1])

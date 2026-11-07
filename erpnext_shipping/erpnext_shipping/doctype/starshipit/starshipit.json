@@ -1,6 +1,6 @@
 {
  "actions": [],
- "creation": "2026-11-06 20:00:00.000000",
+ "creation": "2026-11-06 20:00:00",
  "description": "Starshipit shipping integration: rates from every courier on your Starshipit account, orders, labels, tracking and cancellations.",
  "doctype": "DocType",
  "editable_grid": 1,
@@ -105,61 +105,61 @@
    "read_only": 1
   },
   {
+   "collapsible": 1,
    "fieldname": "store_section",
    "fieldtype": "Section Break",
-   "label": "Online Store",
-   "collapsible": 1
+   "label": "Online Store"
   },
   {
+   "default": "0",
+   "description": "Offer Starshipit rates to shoppers at checkout (Shop app)",
    "fieldname": "shop_checkout_rates",
    "fieldtype": "Check",
-   "label": "Rates at Store Checkout",
-   "default": "0",
-   "description": "Offer Starshipit rates to shoppers at checkout (Shop app)"
+   "label": "Rates at Store Checkout"
   },
   {
+   "default": "0",
+   "description": "Tick if your Starshipit prices include GST",
    "fieldname": "rates_include_tax",
    "fieldtype": "Check",
-   "label": "Rates Include Tax",
-   "default": "0",
-   "description": "Tick if your Starshipit prices include GST"
+   "label": "Rates Include Tax"
   },
   {
+   "description": "Service codes to offer, one per line. Empty offers every service",
    "fieldname": "checkout_services",
    "fieldtype": "Small Text",
-   "label": "Services at Checkout",
-   "description": "Service codes to offer, one per line. Empty offers every service"
+   "label": "Services at Checkout"
   },
   {
    "fieldname": "column_break_store",
    "fieldtype": "Column Break"
   },
   {
+   "description": "Your dispatch address, for checkout rates and new Shipments",
    "fieldname": "sender_address",
    "fieldtype": "Link",
-   "options": "Address",
    "label": "Ship From Address",
-   "description": "Your dispatch address, for checkout rates and new Shipments"
+   "options": "Address"
   },
   {
+   "description": "Contact on Shipments created from store orders",
    "fieldname": "pickup_contact",
    "fieldtype": "Link",
-   "options": "User",
    "label": "Pickup Contact",
-   "description": "Contact on Shipments created from store orders"
+   "options": "User"
   },
   {
+   "default": "Electronic equipment",
+   "description": "Description of Content on Shipments created from store orders",
    "fieldname": "content_description",
    "fieldtype": "Data",
-   "label": "Contents Description",
-   "default": "Electronic equipment",
-   "description": "Description of Content on Shipments created from store orders"
+   "label": "Contents Description"
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-11-07 10:00:00.000000",
+ "modified": "2026-11-07 10:58:24.122343",
  "modified_by": "Administrator",
  "module": "ERPNext Shipping",
  "name": "Starshipit",

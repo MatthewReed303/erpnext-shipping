@@ -41,7 +41,9 @@ from erpnext_shipping.erpnext_shipping.utils import show_error_alert
 STARSHIPIT_PROVIDER = "Starshipit"
 BASE_URL = "https://api.starshipit.com/api"
 TIMEOUT = 30
+CHECKOUT_TIMEOUT = 8
 MIN_REQUEST_INTERVAL = 0.55  # developer API access allows two requests per second
+PACING_KEY = "starshipit:last_request_at"
 WEIGHT_DECIMALS = 3
 SERVICE_ID_SEPARATOR = "|"
 WEBHOOK_METHOD = "erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit.webhook"
@@ -70,7 +72,13 @@ WINDOWS_TIMEZONES = {
 	"Australia/Perth": "W. Australia Standard Time",
 }
 
-_last_request_at = [0.0]
+
+class StarshipitError(frappe.ValidationError):
+	pass
+
+
+class StarshipitNotFoundError(StarshipitError):
+	pass
 
 
 class Starshipit(Document):
@@ -113,32 +121,40 @@ class StarshipitUtils:
 		params: dict | None = None,
 		payload: dict | None = None,
 		log_errors: bool = True,
+		timeout: int = TIMEOUT,
+		retry: bool = True,
 	):
 		"""Call the Starshipit API.
 
-		Paced to the developer rate limit, retried once on HTTP 429, and failures are logged
-		with params, payload and response but never the keys.
+		Paced to the account's rate limit across all workers, retried once on HTTP 429 (unless
+		retry is off), and failures are logged with params, payload and response but never the
+		keys. Raises StarshipitError, StarshipitNotFoundError for HTTP 404.
 		"""
 		if not self.api_key or not self.subscription_key:
 			frappe.throw(_("Set the Starshipit API Key and Subscription Key first."), title=_("Starshipit"))
 		for attempt in range(2):
-			wait = MIN_REQUEST_INTERVAL - (time.monotonic() - _last_request_at[0])
-			if wait > 0:
-				time.sleep(wait)
-			response = requests.request(
-				method,
-				f"{BASE_URL}{path}",
-				params=params,
-				json=payload,
-				headers={
-					"Content-Type": "application/json",
-					"StarShipIT-Api-Key": self.api_key,
-					"Ocp-Apim-Subscription-Key": self.subscription_key,
-				},
-				timeout=TIMEOUT,
-			)
-			_last_request_at[0] = time.monotonic()
-			if response.status_code != 429 or attempt:
+			wait_for_turn()
+			try:
+				response = requests.request(
+					method,
+					f"{BASE_URL}{path}",
+					params=params,
+					json=payload,
+					headers={
+						"Content-Type": "application/json",
+						"StarShipIT-Api-Key": self.api_key,
+						"Ocp-Apim-Subscription-Key": self.subscription_key,
+					},
+					timeout=timeout,
+				)
+			except requests.RequestException:
+				frappe.log_error(title=f"Starshipit {method} {path} did not answer")
+				frappe.throw(
+					_("Starshipit did not answer. Try again in a moment."),
+					StarshipitError,
+					title=_("Starshipit"),
+				)
+			if response.status_code != 429 or attempt or not retry:
 				break
 			time.sleep(min(cint(response.headers.get("Retry-After")) or 2, 10))
 		try:
@@ -158,13 +174,16 @@ class StarshipitUtils:
 				),
 			)
 		if response.status_code == 401:
-			frappe.throw(_("Starshipit rejected the API keys."), title=_("Starshipit"))
+			frappe.throw(_("Starshipit rejected the API keys."), StarshipitError, title=_("Starshipit"))
+		if response.status_code == 404:
+			frappe.throw(self.format_errors(data, response), StarshipitNotFoundError, title=_("Starshipit"))
 		if response.status_code == 429:
 			frappe.throw(
 				_("Starshipit is limiting requests right now (HTTP 429). Try again in a minute."),
+				StarshipitError,
 				title=_("Starshipit"),
 			)
-		frappe.throw(self.format_errors(data, response), title=_("Starshipit"))
+		frappe.throw(self.format_errors(data, response), StarshipitError, title=_("Starshipit"))
 
 	@staticmethod
 	def format_errors(data, response) -> str:
@@ -187,8 +206,10 @@ class StarshipitUtils:
 		parcels: list[dict],
 		value_of_goods: float | None = None,
 		return_order: bool = False,
+		checkout: bool = False,
 	) -> list[dict]:
-		"""Rates for every courier service on the account, cheapest first."""
+		"""Rates for every courier service on the account, cheapest first. For checkout, a slow
+		or failed answer raises StarshipitError instead of showing an alert."""
 		payload = {
 			"sender": rate_address(pickup_address),
 			"destination": rate_address(delivery_address),
@@ -198,13 +219,18 @@ class StarshipitUtils:
 			"return_order": bool(return_order),
 			"signature_required": bool(self.settings.signature_required),
 		}
-		try:
-			data = self.request("POST", "/deliveryservices", payload=payload)
-		except frappe.ValidationError:
-			raise
-		except Exception:
-			show_error_alert("fetching Starshipit rates")
-			return []
+		if checkout:
+			data = self.request(
+				"POST", "/deliveryservices", payload=payload, timeout=CHECKOUT_TIMEOUT, retry=False
+			)
+		else:
+			try:
+				data = self.request("POST", "/deliveryservices", payload=payload)
+			except frappe.ValidationError:
+				raise
+			except Exception:
+				show_error_alert("fetching Starshipit rates")
+				return []
 		services = [self.service_dict(service) for service in data.get("services") or []]
 		return sorted((s for s in services if s.total_price is not None), key=lambda s: flt(s.total_price))
 
@@ -264,7 +290,8 @@ class StarshipitUtils:
 		parcels = json.loads(shipment_parcel) if isinstance(shipment_parcel, str) else shipment_parcel
 		carrier_code, service_code = split_service_id(service_info)
 		if shipment_doc.get("delivery_customer") and (
-			frappe.get_cached_value("Customer", shipment_doc.delivery_customer, "customer_type") == "Individual"
+			frappe.get_cached_value("Customer", shipment_doc.delivery_customer, "customer_type")
+			== "Individual"
 		):
 			delivery_company_name = None  # a person's name is not a company on the label
 		order = {
@@ -282,7 +309,15 @@ class StarshipitUtils:
 		}
 		existing = self.find_order(shipment)
 		if existing and cstr(existing.get("status")).lower() not in UNPRINTED_STATUSES:
-			# the label is printed, so Starshipit no longer allows changes to the order
+			# Starshipit doesn't change an order once its label is printed
+			chosen = tuple(cstr(code) for code in split_service_id(service_info))
+			if chosen != (cstr(order_carrier(existing)), cstr(existing.get("carrier_service_code"))):
+				frappe.throw(
+					_(
+						"The label for {0} is printed already. Cancel the Shipment to send it another way."
+					).format(frappe.bold(shipment)),
+					title=_("Label Printed"),
+				)
 			order_id = existing["order_id"]
 		elif existing:
 			# repeated or retried: update the order already in Starshipit, never create a second one.
@@ -326,7 +361,7 @@ class StarshipitUtils:
 		"""The Starshipit order with this order number, if one exists."""
 		try:
 			data = self.request("GET", "/orders", params={"order_number": order_number}, log_errors=False)
-		except frappe.ValidationError:
+		except StarshipitNotFoundError:
 			frappe.clear_messages()
 			return None
 		order = data.get("order") or {}
@@ -371,6 +406,8 @@ class StarshipitUtils:
 
 	def print_label(self, shipment_doc) -> tuple[list[bytes], list[str]]:
 		"""Label PDFs and tracking numbers for the Starshipit order behind a Shipment."""
+		# one label at a time per Shipment, so two clicks don't buy two labels
+		frappe.db.get_value("Shipment", shipment_doc.name, "name", for_update=True)
 		order = self.get_order(shipment_doc.shipment_id)
 		reprint = self.already_printed(shipment_doc, order)
 		if not reprint and not self.settings.allow_label_printing:
@@ -407,7 +444,9 @@ class StarshipitUtils:
 			chosen = services
 		if not chosen:
 			frappe.throw(
-				_("{0} is not available for this order.").format(frappe.bold(shipment_doc.carrier_service or "?")),
+				_("{0} is not available for this order.").format(
+					frappe.bold(shipment_doc.carrier_service or "?")
+				),
 				title=_("Starshipit"),
 			)
 		return chosen[0]
@@ -486,6 +525,15 @@ class StarshipitUtils:
 
 
 # --- Helpers ------------------------------------------------------------------
+
+
+def wait_for_turn() -> None:
+	"""Keep to the API's request rate across every worker on the site."""
+	last = frappe.utils.flt(frappe.cache.get_value(PACING_KEY))
+	wait = MIN_REQUEST_INTERVAL - (time.time() - last)
+	if wait > 0:
+		time.sleep(wait)
+	frappe.cache.set_value(PACING_KEY, time.time(), expires_in_sec=5)
 
 
 def sync_rows(rows: list[dict], existing: list[dict] | None, id_field: str) -> list[dict]:
@@ -713,6 +761,12 @@ def apply_status(shipment_name: str, data: dict):
 	from erpnext_shipping.erpnext_shipping.shipping import update_delivery_note
 
 	values = {k: data[k] for k in ("tracking_status", "tracking_status_info") if data.get(k) is not None}
+	# a delivered parcel stays delivered, whatever order late or repeated events arrive in
+	if frappe.db.get_value("Shipment", shipment_name, "tracking_status") == "Delivered" and data.get(
+		"tracking_status"
+	) not in ("Delivered", "Returned"):
+		values.pop("tracking_status", None)
+		values.pop("tracking_status_info", None)
 	for field in ("awb_number", "tracking_url"):
 		if data.get(field):
 			values[field] = data[field]
@@ -799,12 +853,9 @@ def cancel_shipment_order(doc, method=None):
 		return
 	if not frappe.db.get_single_value("Starshipit", "enabled"):
 		return
-	try:
-		utils = StarshipitUtils()
-		result = utils.cancel_order(doc.shipment_id, printed=utils.already_printed(doc))
-	except Exception:
-		show_error_alert("cancelling the Starshipit order")
-		return
+	# a failure stops the cancel, so the Shipment is never cancelled while its order is still live
+	utils = StarshipitUtils()
+	result = utils.cancel_order(doc.shipment_id, printed=utils.already_printed(doc))
 	if result == "archived":
 		frappe.msgprint(
 			_("Starshipit order archived. Cancel the consignment with the courier if it won't be sent."),
@@ -826,7 +877,7 @@ def webhook(token: str | None = None):
 	"""Tracking update pushed by Starshipit.
 
 	Authenticated by the X-Starshipit-Signature header when a webhook secret is set, otherwise
-	by the token in the webhook URL. Duplicate events are harmless: the same values are written.
+	by the token in the webhook URL. Repeated or late events don't undo a delivery.
 	"""
 	settings = frappe.get_single("Starshipit")
 	secret = settings.get_password("webhook_secret", raise_exception=False)
@@ -844,6 +895,8 @@ def webhook(token: str | None = None):
 	try:
 		payload = json.loads(raw_body or b"{}")
 	except ValueError:
+		payload = None
+	if not isinstance(payload, dict):
 		frappe.local.response.http_status_code = 400
 		return {"ok": False}
 

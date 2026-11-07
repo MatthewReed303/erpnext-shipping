@@ -4,8 +4,8 @@ Both are registered in hooks.py and only run when the Shop app calls them:
 
 - shop_shipping_rate_providers: rates for the shopper's cart and address. Parcels come from
   the items' weights and Parcel Templates, packed the same way as a Shipment's parcels
-  (erpnext_shipping.utils.parcels_for_items). Quotes are cached for 15 minutes, since checkout
-  asks again as the shopper types and Starshipit allows two requests a second.
+  (erpnext_shipping.utils.parcels_for_items). Answers are cached for 15 minutes, since checkout
+  asks again as the shopper types and Starshipit allows two requests a second; failures aren't.
 - shop_fulfillment_providers["starshipit"]: when a paid order is sent for fulfilment, it is
   delivered (Delivery Note) and a draft Shipment is made with the parcels and the service the
   customer chose. You check the parcels, submit, and create the Starshipit order as usual.
@@ -65,7 +65,10 @@ def checkout_rates(context) -> dict | None:
 	parcels = parcels_for_items(lines, None, s.default_parcel_template)
 	if not parcels:
 		frappe.log_error(title="Store shipping: items have no weight", message=json.dumps(context.cart_items))
-		return {"options": [], "messages": [_("We can't work out shipping for these items. Please contact us.")]}
+		return {
+			"options": [],
+			"messages": [_("We can't work out shipping for these items. Please contact us.")],
+		}
 	destination = frappe._dict(
 		address_line1=address.address_line1,
 		address_line2=address.address_line2,
@@ -78,12 +81,26 @@ def checkout_rates(context) -> dict | None:
 	key = cache_key(sender, destination, parcels)
 	services = frappe.cache.get_value(key)
 	if services is None:
-		services = [
-			dict(service)
-			for service in StarshipitUtils().get_available_services(
-				pickup_address=sender, delivery_address=destination, parcels=parcels, value_of_goods=context.subtotal
-			)
-		]
+		try:
+			services = [
+				dict(service)
+				for service in StarshipitUtils().get_available_services(
+					pickup_address=sender,
+					delivery_address=destination,
+					parcels=parcels,
+					value_of_goods=context.subtotal,
+					checkout=True,
+				)
+			]
+		except frappe.ValidationError:
+			# not cached, so the next quote asks Starshipit again
+			frappe.clear_messages()
+			return {
+				"options": [],
+				"messages": [
+					_("Live shipping prices aren't available right now. Please try again in a moment.")
+				],
+			}
 		frappe.cache.set_value(key, services, expires_in_sec=RATE_CACHE_SECONDS)
 	allowed = allowed_services()
 	options = []
@@ -180,10 +197,15 @@ class StarshipitFulfillment(FulfillmentProvider):
 
 	def is_configured(self) -> bool:
 		s = settings()
-		return bool(s.enabled and s.get("sender_address") and s.get("pickup_contact"))
+		return bool(
+			s.enabled and s.get("sender_address") and s.get("pickup_contact") and pickup_phone_valid()
+		)
 
 	def setup_hint(self) -> str:
-		return _("Enable Starshipit and set the Ship From Address and Pickup Contact in Starshipit settings.")
+		return _(
+			"Enable Starshipit and set the Ship From Address and a Pickup Contact whose phone starts with + and "
+			"the country code, in Starshipit settings."
+		)
 
 	def create_shipment(self, order, items: list[dict]) -> dict:
 		shipment = create_shipment_for_order(order.name)
@@ -220,14 +242,22 @@ class StarshipitFulfillment(FulfillmentProvider):
 		return result
 
 	def cancel(self, fulfillment) -> dict:
+		"""Cancel the Shipment (and its Starshipit order) and the unbilled Delivery Notes made for it,
+		so the stock is back."""
 		name = fulfillment.external_id
 		if name and frappe.db.exists("Shipment", name):
 			doc = frappe.get_doc("Shipment", name)
+			notes = [row.delivery_note for row in doc.shipment_delivery_note]
 			if doc.docstatus == 0:
 				doc.delete(ignore_permissions=True)
 			elif doc.docstatus == 1:
 				doc.flags.ignore_permissions = True
 				doc.cancel()  # also deletes or archives the Starshipit order
+			for note in notes:
+				note_doc = frappe.get_doc("Delivery Note", note)
+				if note_doc.docstatus == 1 and not flt(note_doc.per_billed):
+					note_doc.flags.ignore_permissions = True
+					note_doc.cancel()
 		return {"status": "Cancelled"}
 
 
@@ -235,11 +265,15 @@ def create_shipment_for_order(order_name: str) -> str:
 	"""Deliver the order and make a draft Shipment for it. Returns the Shipment name."""
 	from erpnext.stock.doctype.delivery_note.delivery_note import make_shipment
 
-	existing = frappe.db.get_value(
-		"Shipment Delivery Note",
-		{"delivery_note": ["in", delivery_notes(order_name)], "docstatus": ["<", 2]},
-		"parent",
-	) if delivery_notes(order_name) else None
+	existing = (
+		frappe.db.get_value(
+			"Shipment Delivery Note",
+			{"delivery_note": ["in", delivery_notes(order_name)], "docstatus": ["<", 2]},
+			"parent",
+		)
+		if delivery_notes(order_name)
+		else None
+	)
 	if existing:
 		return existing
 	delivery_note = deliver(order_name)
@@ -250,7 +284,6 @@ def create_shipment_for_order(order_name: str) -> str:
 	shipment.pickup_contact_person = s.pickup_contact
 	shipment.pickup_date = next_business_day()
 	shipment.description_of_content = s.get("content_description") or _("Goods")
-	shipment.value_of_goods = goods_value(order_name)
 	shipment.parcel_template = None
 	choice = chosen_service(order_name)
 	if choice:
@@ -258,8 +291,18 @@ def create_shipment_for_order(order_name: str) -> str:
 	shipment.flags.ignore_permissions = True
 	shipment.insert(ignore_permissions=True)
 	if choice:
-		shipment.add_comment("Info", _("The customer chose {0} at checkout.").format(frappe.bold(choice.get("label") or "")))
+		shipment.add_comment(
+			"Info", _("The customer chose {0} at checkout.").format(frappe.bold(choice.get("label") or ""))
+		)
 	return shipment.name
+
+
+def pickup_phone_valid() -> bool:
+	"""The pickup contact's phone is in the form a Shipment needs: + and the country code."""
+	import re
+
+	phone = frappe.db.get_value("User", settings().get("pickup_contact"), "phone")
+	return bool(phone and re.match(r"^\+(?![\s0])[\d\s]+\d$", phone))
 
 
 def delivery_notes(order_name: str) -> list[str]:
@@ -272,10 +315,11 @@ def delivery_notes(order_name: str) -> list[str]:
 
 
 def deliver(order_name: str) -> str:
-	"""The order's submitted Delivery Note, creating it when there is none yet."""
+	"""A submitted Delivery Note for what the order still has to deliver; when it is all delivered,
+	its latest Delivery Note."""
 	existing = delivery_notes(order_name)
-	if existing:
-		return existing[0]
+	if existing and flt(frappe.db.get_value("Sales Order", order_name, "per_delivered")) >= 100:
+		return existing[-1]
 	try:
 		from shop.compat import make_delivery_note
 	except ImportError:
@@ -287,22 +331,12 @@ def deliver(order_name: str) -> str:
 	return note.name
 
 
-def goods_value(order_name: str) -> float:
-	order = frappe.get_doc("Sales Order", order_name)
-	return flt(
-		sum(
-			flt(row.base_net_amount)
-			for row in order.items
-			if frappe.db.get_value("Item", row.item_code, "is_stock_item")
-		),
-		2,
-	)
-
-
 def chosen_service(order_name: str) -> dict | None:
-	raw = frappe.db.get_value("Sales Order", order_name, "shop_shipping_option") if frappe.get_meta(
-		"Sales Order"
-	).has_field("shop_shipping_option") else None
+	raw = (
+		frappe.db.get_value("Sales Order", order_name, "shop_shipping_option")
+		if frappe.get_meta("Sales Order").has_field("shop_shipping_option")
+		else None
+	)
 	if not raw:
 		return None
 	try:
@@ -331,9 +365,11 @@ def mark_preferred(services: list[dict], shipment: str | None) -> list[dict]:
 	"""Flag the service the customer chose at checkout in the Shipment's service list."""
 	if not shipment or not frappe.db.exists("Shipment", shipment):
 		return services
-	raw = frappe.db.get_value("Shipment", shipment, "preferred_service") if frappe.get_meta(
-		"Shipment"
-	).has_field("preferred_service") else None
+	raw = (
+		frappe.db.get_value("Shipment", shipment, "preferred_service")
+		if frappe.get_meta("Shipment").has_field("preferred_service")
+		else None
+	)
 	if not raw:
 		return services
 	try:
