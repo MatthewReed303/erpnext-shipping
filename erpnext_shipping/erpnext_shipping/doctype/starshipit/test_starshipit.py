@@ -58,6 +58,23 @@ def not_found():
 	return response({"success": False, "errors": [{"message": "Order not found"}]}, status=404)
 
 
+def no_order():
+	return response({"orders": [], "total_pages": 0, "success": True})
+
+
+def found(order, number="SHIP-TEST-1"):
+	"""Search Orders finding the order, then Get Order with its details."""
+	return [
+		response(
+			{
+				"orders": [{"order_id": order["order_id"], "order_number": number, "archived": False}],
+				"success": True,
+			}
+		),
+		response({"order": order, "success": True}),
+	]
+
+
 def address(**values):
 	data = {
 		"address_title": "Test",
@@ -293,15 +310,17 @@ class TestStarshipit(IntegrationTestCase):
 	@patch(REQUESTS)
 	def test_create_order_then_set_courier(self, request):
 		request.side_effect = [
-			not_found(),
+			no_order(),
 			response({"order": {"order_id": 987654}, "success": True}),
 			response({"order": {"order_id": 987654, "carrier": "PlainLabel"}, "success": True}),
 		]
 		info = self.create(request, self.shipment())
 
-		self.assertEqual(calls(request), [("GET", "/orders"), ("POST", "/orders"), ("PUT", "/orders")])
+		self.assertEqual(calls(request), [("GET", "/orders/search"), ("POST", "/orders"), ("PUT", "/orders")])
 		lookup, create, set_courier = request.call_args_list
-		self.assertEqual(lookup.kwargs["params"], {"order_number": "SHIP-TEST-1"})
+		self.assertEqual(
+			lookup.kwargs["params"], {"phrase": "SHIP-TEST-1", "fields": "Order_Number", "status": "All"}
+		)
 		order = create.kwargs["json"]["order"]
 		# Create Order - Order Model has no courier fields
 		self.assertNotIn("carrier", order)
@@ -330,13 +349,10 @@ class TestStarshipit(IntegrationTestCase):
 			"items": [{"item_id": 71, "sku": "OLD"}],
 			"packages": [{"package_id": 81, "weight": 0.5}, {"package_id": 82, "weight": 0.5}],
 		}
-		request.side_effect = [
-			response({"order": existing, "success": True}),
-			response({"order": {"order_id": 555}, "success": True}),
-		]
+		request.side_effect = [*found(existing), response({"order": {"order_id": 555}, "success": True})]
 		info = self.create(request, self.shipment())
 		# one update that replaces rows by id (rows without an id would be added) and sets the courier
-		self.assertEqual(calls(request), [("GET", "/orders"), ("PUT", "/orders")])
+		self.assertEqual(calls(request), [("GET", "/orders/search"), ("GET", "/orders"), ("PUT", "/orders")])
 		order = request.call_args.kwargs["json"]["order"]
 		self.assertEqual(
 			(order["order_id"], order["carrier"], order["carrier_service_code"]),
@@ -370,7 +386,7 @@ class TestStarshipit(IntegrationTestCase):
 				}
 			).insert(ignore_permissions=True)
 		request.side_effect = [
-			not_found(),
+			no_order(),
 			response({"order": {"order_id": 9}, "success": True}),
 			response({"order": {"order_id": 9}, "success": True}),
 		]
@@ -411,14 +427,12 @@ class TestStarshipit(IntegrationTestCase):
 			"carrier": "PlainLabel",
 			"carrier_service_code": "Plain Label",
 		}
-		request.side_effect = [response({"order": printed, "success": True})]
+		request.side_effect = found(printed)
 		info = self.create(request, self.shipment())
-		self.assertEqual(calls(request), [("GET", "/orders")])
+		self.assertEqual(calls(request), [("GET", "/orders/search"), ("GET", "/orders")])
 		self.assertEqual(info["shipment_id"], "556")
 		# another service can't be set once the label is printed
-		request.side_effect = [
-			response({"order": dict(printed, carrier_service_code="Express"), "success": True})
-		]
+		request.side_effect = found(dict(printed, carrier_service_code="Express"))
 		with self.assertRaises(frappe.ValidationError):
 			self.create(request, self.shipment())
 
@@ -427,7 +441,23 @@ class TestStarshipit(IntegrationTestCase):
 		request.side_effect = [response({"success": False}, status=503)]
 		with self.assertRaises(frappe.ValidationError):
 			self.create(request, self.shipment())
-		self.assertEqual(calls(request), [("GET", "/orders")])
+		self.assertEqual(calls(request), [("GET", "/orders/search")])
+
+	@patch(REQUESTS)
+	def test_an_archived_order_is_sent_again(self, request):
+		request.side_effect = [
+			response(
+				{
+					"orders": [{"order_id": 77, "order_number": "SHIP-TEST-1", "archived": True}],
+					"success": True,
+				}
+			),
+			response({"order": {"order_id": 78}, "success": True}),
+			response({"order": {"order_id": 78}, "success": True}),
+		]
+		info = self.create(request, self.shipment())
+		self.assertEqual(calls(request), [("GET", "/orders/search"), ("POST", "/orders"), ("PUT", "/orders")])
+		self.assertEqual(info["shipment_id"], "78")
 
 	@patch(REQUESTS)
 	def test_label_refused_unless_allowed(self, request):
@@ -604,11 +634,11 @@ class TestStarshipit(IntegrationTestCase):
 	@patch(REQUESTS)
 	def test_status_from_order_when_no_courier_tracking(self, request):
 		request.side_effect = [
-			response({"order": {"order_id": 9, "status": "Printed", "manifested": True}, "success": True}),
+			*found({"order_id": 9, "status": "Printed", "manifested": True}),
 			not_found(),
 		]
 		data = StarshipitUtils().get_tracking_data("SHIP-TEST-1")
-		self.assertEqual(calls(request), [("GET", "/orders"), ("GET", "/track")])
+		self.assertEqual(calls(request), [("GET", "/orders/search"), ("GET", "/orders"), ("GET", "/track")])
 		self.assertEqual(
 			(data["tracking_status"], data["tracking_status_info"]), ("In Progress", "Manifested")
 		)

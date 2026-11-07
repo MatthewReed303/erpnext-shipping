@@ -358,14 +358,22 @@ class StarshipitUtils:
 		}
 
 	def find_order(self, order_number: str) -> dict | None:
-		"""The Starshipit order with this order number, if one exists."""
-		try:
-			data = self.request("GET", "/orders", params={"order_number": order_number}, log_errors=False)
-		except StarshipitNotFoundError:
-			frappe.clear_messages()
-			return None
-		order = data.get("order") or {}
-		return order if order.get("order_id") else None
+		"""The Starshipit order with this order number, unless there is none or it was archived.
+		Search Orders answers with no orders when there is none; Get Order answers with an error."""
+		data = self.request(
+			"GET",
+			"/orders/search",
+			params={"phrase": order_number, "fields": "Order_Number", "status": "All"},
+		)
+		found = next(
+			(
+				order
+				for order in data.get("orders") or []
+				if cstr(order.get("order_number")) == cstr(order_number) and not order.get("archived")
+			),
+			None,
+		)
+		return self.get_order(found["order_id"]) if found else None
 
 	def get_order(self, order_id) -> dict:
 		return self.request("GET", "/orders", params={"order_id": cint(order_id)}).get("order") or {}
