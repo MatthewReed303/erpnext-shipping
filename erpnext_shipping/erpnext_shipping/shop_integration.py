@@ -331,6 +331,7 @@ class ShippingFulfillment(FulfillmentProvider):
 
 	key = "erpnext_shipping"
 	label = "ERPNext Shipping (Shipment)"
+	needs_ship_from = True
 	shipping_providers = None  # every provider of this app
 
 	def is_configured(self) -> bool:
