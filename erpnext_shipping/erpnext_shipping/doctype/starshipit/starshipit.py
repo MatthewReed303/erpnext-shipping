@@ -873,6 +873,9 @@ def cancel_shipment_order(doc, method=None):
 		return
 	# a failure stops the cancel, so the Shipment is never cancelled while its order is still live
 	utils = StarshipitUtils()
+	if not utils.find_order(doc.name):
+		# gone already: removed in Starshipit, or by a cancel here that was then undone
+		return
 	result = utils.cancel_order(doc.shipment_id, printed=utils.already_printed(doc))
 	if result == "archived":
 		frappe.msgprint(

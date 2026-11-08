@@ -632,6 +632,24 @@ class TestStarshipit(IntegrationTestCase):
 		self.assertEqual(request.call_args.kwargs["params"], {"order_id": "123"})
 
 	@patch(REQUESTS)
+	def test_cancel_when_the_order_is_already_gone(self, request):
+		from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import cancel_shipment_order
+
+		shipment = self.shipment(service_provider=STARSHIPIT_PROVIDER, shipment_id="123")
+		request.side_effect = [response({"orders": [], "success": True})]
+		cancel_shipment_order(shipment)
+		self.assertEqual(calls(request), [("GET", "/orders/search")])
+
+		unshipped = {"order_id": 123, "status": "Unshipped"}
+		request.side_effect = [
+			*found(unshipped),
+			response({"order": unshipped, "success": True}),
+			response({"success": True}),
+		]
+		cancel_shipment_order(shipment)
+		self.assertEqual(calls(request)[-1], ("DELETE", "/orders/delete"))
+
+	@patch(REQUESTS)
 	def test_status_from_order_when_no_courier_tracking(self, request):
 		request.side_effect = [
 			*found({"order_id": 9, "status": "Printed", "manifested": True}),
