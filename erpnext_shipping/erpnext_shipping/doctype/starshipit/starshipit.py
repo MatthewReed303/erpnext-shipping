@@ -903,12 +903,33 @@ def cancel_shipment_order(doc, method=None):
 		return
 	if not frappe.db.get_single_value("Starshipit", "enabled"):
 		return
-	# a failure stops the cancel, so the Shipment is never cancelled while its order is still live
+	# Starshipit is asked first (a failure stops the cancel), and the order is removed only once the
+	# cancel is saved, so a cancel that is then rolled back (e.g. a store cancel failing later)
+	# leaves the Starshipit order as it was
 	utils = StarshipitUtils()
 	if not utils.find_order(doc.name):
 		# gone already: removed in Starshipit, or by a cancel here that was then undone
 		return
-	result = utils.cancel_order(doc.shipment_id, printed=utils.already_printed(doc))
+	printed = utils.already_printed(doc)
+	frappe.db.after_commit.add(lambda: remove_order(doc.name, doc.shipment_id, printed))
+
+
+def remove_order(shipment: str, order_id: str, printed: bool) -> None:
+	"""Delete (or archive, once printed) a cancelled Shipment's Starshipit order. Runs after the
+	cancel is committed; a failure is noted on the Shipment for staff to remove it in Starshipit."""
+	try:
+		result = StarshipitUtils().cancel_order(order_id, printed=printed)
+	except Exception:
+		frappe.clear_messages()
+		frappe.log_error(title=f"Starshipit order of {shipment} not removed")
+		frappe.get_doc("Shipment", shipment).add_comment(
+			"Info",
+			_(
+				"The Shipment is cancelled but its Starshipit order couldn't be removed. Delete or archive it in Starshipit."
+			),
+		)
+		frappe.db.commit()  # nosemgrep: runs after the cancel was committed
+		return
 	if result == "archived":
 		frappe.msgprint(
 			_("Starshipit order archived. Cancel the consignment with the courier if it won't be sent."),

@@ -648,7 +648,22 @@ class TestStarshipit(IntegrationTestCase):
 			response({"success": True}),
 		]
 		cancel_shipment_order(shipment)
+		# nothing is removed until the cancel is committed
+		self.assertNotIn(("DELETE", "/orders/delete"), calls(request))
+		frappe.db.after_commit.run()
 		self.assertEqual(calls(request)[-1], ("DELETE", "/orders/delete"))
+
+	@patch(REQUESTS)
+	def test_a_rolled_back_cancel_leaves_the_starshipit_order(self, request):
+		from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import cancel_shipment_order
+
+		shipment = self.shipment(service_provider=STARSHIPIT_PROVIDER, shipment_id="123")
+		unshipped = {"order_id": 123, "status": "Unshipped"}
+		request.side_effect = [*found(unshipped), response({"order": unshipped, "success": True})]
+		cancel_shipment_order(shipment)
+		frappe.db.after_commit.reset()  # what a rollback does
+		self.assertNotIn(("DELETE", "/orders/delete"), calls(request))
+		self.assertNotIn(("POST", "/orders/archive"), calls(request))
 
 	@patch(REQUESTS)
 	def test_status_from_order_when_no_courier_tracking(self, request):
