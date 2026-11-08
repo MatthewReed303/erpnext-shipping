@@ -334,6 +334,10 @@ class ShippingFulfillment(FulfillmentProvider):
 	needs_ship_from = True
 	shipping_providers = None  # every provider of this app
 
+	def default_ship_from(self) -> str | None:
+		"""Starshipit's Ship From Address, which holds the store's shipping defaults."""
+		return settings().get("sender_address")
+
 	def is_configured(self) -> bool:
 		return any(
 			frappe.db.get_single_value(provider, "enabled")
