@@ -5,3 +5,4 @@ execute:from erpnext_shipping.install import after_install;after_install() # 202
 execute:from erpnext_shipping.install import after_install;after_install() # 2026-11-07 item parcel template and own box
 execute:from erpnext_shipping.install import after_install;after_install() # 2026-11-07 store fields
 execute:from erpnext_shipping.install import after_install;after_install() # 2026-11-08 shipping fields copied to variants
+execute:from erpnext_shipping.install import after_install;after_install() # 2026-11-09 warehouse pickup contact

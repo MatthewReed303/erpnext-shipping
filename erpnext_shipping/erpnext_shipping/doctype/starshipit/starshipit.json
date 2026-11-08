@@ -135,22 +135,21 @@
    "fieldtype": "Column Break"
   },
   {
-   "description": "Your dispatch address, for checkout rates and new Shipments",
+   "description": "Dispatch address for checkout rates and Shipments of store orders, when the store's warehouse has none of its own",
    "fieldname": "sender_address",
    "fieldtype": "Link",
    "label": "Ship From Address",
    "options": "Address"
   },
   {
-   "description": "Contact on Shipments created from store orders",
+   "description": "Contact on Shipments created from store orders, when their warehouse has no Pickup Contact of its own",
    "fieldname": "pickup_contact",
    "fieldtype": "Link",
    "label": "Pickup Contact",
    "options": "User"
   },
   {
-   "default": "Electronic equipment",
-   "description": "Description of Content on Shipments created from store orders",
+   "description": "Description of Content on Shipments created from store orders, by any shipping provider",
    "fieldname": "content_description",
    "fieldtype": "Data",
    "label": "Contents Description"
@@ -159,7 +158,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-11-09 13:00:00.000000",
+ "modified": "2026-11-09 15:00:00.000000",
  "modified_by": "Administrator",
  "module": "ERPNext Shipping",
  "name": "Starshipit",

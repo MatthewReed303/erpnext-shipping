@@ -848,7 +848,7 @@ class TestStarshipitStore(IntegrationTestCase):
 		settings.sender_address = self.sender()
 		settings.save()
 		frappe.clear_cache(doctype="Starshipit")
-		frappe.cache.delete_keys("starshipit_rates:")
+		frappe.cache.delete_keys("shipping_rates:")
 		self.item = self.weighed_item("_Test Starshipit Store Item", 0.4)
 		sleep = patch(MODULE + ".time.sleep")
 		sleep.start()

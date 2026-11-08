@@ -30,6 +30,18 @@ def get_custom_fields():
 				"insert_after": "ships_in_own_box",
 			},
 		],
+		"Warehouse": [
+			{
+				"fieldname": "shipping_pickup_contact",
+				"label": _("Pickup Contact"),
+				"fieldtype": "Link",
+				"options": "User",
+				"description": _(
+					"Hands parcels from this warehouse to the courier, on Shipments created from store orders"
+				),
+				"insert_after": "mobile_no",
+			},
+		],
 		"Shipment": [
 			{
 				"fieldname": "preferred_service",
@@ -109,7 +121,7 @@ def get_custom_fields():
 				"translatable": 0,
 				"insert_after": "tracking_status",
 			},
-		]
+		],
 	}
 
 

@@ -1,14 +1,17 @@
-"""Starshipit for the Shop app: live rates at checkout, and store orders handed to Shipments.
+"""Shipping providers for the Shop app: live rates at checkout, and store parcels handed to Shipments.
 
 Both are registered in hooks.py and only run when the Shop app calls them:
 
-- shop_shipping_rate_providers: rates for the shopper's cart and address. Parcels come from
-  the items' weights and Parcel Templates, packed the same way as a Shipment's parcels
-  (erpnext_shipping.utils.parcels_for_items). Answers are cached for 15 minutes, since checkout
-  asks again as the shopper types and Starshipit allows two requests a second; failures aren't.
-- shop_fulfillment_providers["starshipit"]: when a paid order is sent for fulfilment, it is
-  delivered (Delivery Note) and a draft Shipment is made with the parcels and the service the
-  customer chose. You check the parcels, submit, and create the Starshipit order as usual.
+- shop_shipping_rate_providers: rates for one parcel of the shopper's cart (what one warehouse
+  sends) to their address, from every enabled provider set to offer "Rates at Store Checkout".
+  Boxes come from the items' weights and Parcel Templates, packed the same way as a Shipment's
+  parcels (erpnext_shipping.utils.parcels_for_items). Answers are cached for 15 minutes per
+  provider, since checkout asks again as the shopper types; failures aren't.
+- shop_fulfillment_providers["erpnext_shipping"]: when a paid order's parcel is sent for
+  fulfilment, its items are delivered from its warehouse (Delivery Note) and a draft Shipment is
+  made from its Ship From Address, with the service the customer chose shown first in Fetch
+  Shipping Rates. You check the parcels, submit, and book it with the provider as usual.
+  "starshipit" does the same with Starshipit rates only, for stores and records set up with it.
 """
 
 import hashlib
@@ -16,120 +19,196 @@ import json
 
 import frappe
 from frappe import _
-from frappe.utils import add_days, cint, flt, getdate, nowdate
+from frappe.utils import add_days, cint, cstr, flt, getdate, nowdate
 
 from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import (
 	STARSHIPIT_PROVIDER,
-	StarshipitUtils,
 	kg_per_unit,
 )
-from erpnext_shipping.erpnext_shipping.utils import parcels_for_items
+from erpnext_shipping.erpnext_shipping.utils import get_address, parcels_for_items
 
 RATE_CACHE_SECONDS = 15 * 60
-# Starshipit statuses before the courier has the parcel: a printed label is not shipped yet
+RATE_CACHE_PREFIX = "shipping_rates:"
+# statuses before the courier has the parcel: a printed label is not shipped yet
 NOT_YET_SHIPPED = {"", "unshipped", "saved", "new", "printed"}
-OPTION_PREFIX = "starshipit:"
 
 
 # --- checkout rates ---------------------------------------------------------------
 
 
 def settings():
+	"""Starshipit's settings, which also hold the store's defaults for Shipments of store orders."""
 	return frappe.get_cached_doc("Starshipit")
 
 
-def store_rates_enabled() -> bool:
-	s = settings()
-	return bool(s.enabled and s.get("shop_checkout_rates") and s.get("sender_address"))
+def shipping_providers() -> list[str]:
+	from erpnext_shipping.erpnext_shipping.shipping import rate_providers
+
+	return list(rate_providers())
+
+
+def offers_checkout_rates(provider: str) -> bool:
+	s = frappe.get_cached_doc(provider)
+	return bool(s.enabled and s.get("shop_checkout_rates"))
+
+
+def checkout_providers(location_provider: str | None = None) -> list[str]:
+	"""Providers quoting at checkout for a store location sent by this Shop fulfilment provider.
+
+	A location sent by another fulfilment provider gets no rates from here; no location (a Shop
+	from before fulfilment locations) gets them from every provider."""
+	if location_provider:
+		fulfillment = FULFILLMENT_PROVIDERS.get(location_provider)
+		if not fulfillment:
+			return []
+		names = list(fulfillment.shipping_providers or shipping_providers())
+	else:
+		names = shipping_providers()
+	return [name for name in names if offers_checkout_rates(name)]
 
 
 def checkout_rates(context) -> dict | None:
-	"""Starshipit services and prices for a cart going to an address (Shop rate provider).
+	"""Services and prices for one parcel of a cart going to an address (Shop rate provider).
 
-	None when store rates are switched off, so Shop knows Starshipit is not in use."""
-	if not store_rates_enabled():
+	None when no provider offers store rates for the parcel's location, so Shop knows they are
+	not in use. Prices a provider gives without a currency are taken to be in the store's."""
+	providers = checkout_providers(context.get("location_provider"))
+	if not providers:
 		return None
-	s = settings()
-	address = context.address
-	sender = sender_address()
 	lines, restricted = cart_lines(context.cart_items)
 	if not lines:
-		return None  # nothing in the cart is sent
-	if address.country and address.country != sender.country and restricted:
+		return None  # nothing in the parcel is sent
+	try:
+		origin = origin_address(context.get("ship_from"))
+	except frappe.ValidationError:
+		frappe.clear_messages()
+		frappe.log_error(
+			title="Store shipping: Ship From Address is incomplete", message=cstr(context.get("ship_from"))
+		)
+		return cannot_quote()
+	if not origin:
+		return None  # nowhere to send from
+	address = context.address
+	if address.country and address.country != origin.country and restricted:
 		return {
 			"options": [],
 			"messages": [
 				_("{0} can only be sent within {1}. Remove it to ship overseas, or contact us.").format(
-					", ".join(restricted), sender.country
+					", ".join(restricted), origin.country
 				)
 			],
 		}
 	try:
-		parcels = parcels_for_items(lines, None, s.default_parcel_template)
+		parcels = parcels_for_items(lines, None, settings().get("default_parcel_template"))
 	except frappe.ValidationError:
 		frappe.clear_messages()
 		parcels = []
 	if not parcels:
 		frappe.log_error(title="Store shipping: items have no weight", message=json.dumps(context.cart_items))
+		return cannot_quote()
+	# rates depend on the addresses and parcels, not on who receives them
+	contact = user_contact(pickup_contact_user(context.get("warehouse")))
+	request = frappe._dict(
+		pickup_from_type="Company",
+		delivery_to_type="Customer",
+		pickup_address=origin,
+		delivery_address=destination_address(address),
+		parcels=parcels,
+		value_of_goods=flt(context.subtotal),
+		description_of_content=content_description(),
+		pickup_date=next_business_day(),
+		pickup_contact=contact,
+		delivery_contact=contact,
+		checkout=True,
+	)
+	options, failed = [], False
+	for provider in providers:
+		services = provider_rates(provider, request)
+		if services is None:
+			failed = True
+			continue
+		options += checkout_options(provider, services, context.get("currency"))
+	if failed and not options:
 		return {
 			"options": [],
-			"messages": [_("We can't work out shipping for these items. Please contact us.")],
+			"messages": [_("Live shipping prices aren't available right now. Please try again in a moment.")],
 		}
-	destination = frappe._dict(
-		address_line1=address.address_line1,
-		address_line2=address.address_line2,
-		city=address.city,
-		state=address.state,
-		pincode=(address.pincode or "").replace(" ", ""),
-		country=address.country,
-		country_code=address.country_code or "",
-	)
-	key = cache_key(sender, destination, parcels)
+	return {"options": sorted(options, key=lambda option: option["amount"])}
+
+
+def cannot_quote() -> dict:
+	return {"options": [], "messages": [_("We can't work out shipping for these items. Please contact us.")]}
+
+
+def provider_rates(provider: str, request: frappe._dict) -> list[dict] | None:
+	"""A provider's services for the request, from the cache when it was asked recently; None when
+	it failed, so the next quote asks again."""
+	from erpnext_shipping.erpnext_shipping.shipping import get_shipping_rates
+
+	key = cache_key(provider, request.pickup_address, request.delivery_address, request.parcels)
 	services = frappe.cache.get_value(key)
-	if services is None:
-		try:
-			services = [
-				dict(service)
-				for service in StarshipitUtils().get_available_services(
-					pickup_address=sender,
-					delivery_address=destination,
-					parcels=parcels,
-					value_of_goods=context.subtotal,
-					checkout=True,
-				)
-			]
-		except frappe.ValidationError:
-			# not cached, so the next quote asks Starshipit again
-			frappe.clear_messages()
-			return {
-				"options": [],
-				"messages": [
-					_("Live shipping prices aren't available right now. Please try again in a moment.")
-				],
-			}
+	if services is not None:
+		return services
+	try:
+		services = [dict(service) for service in get_shipping_rates(request, [provider])]
+	except frappe.ValidationError:
+		services = None  # e.g. a postcode the provider doesn't know, while the shopper types
+	except Exception:
+		frappe.log_error(title=f"Store shipping: {provider} rates failed")
+		services = None
+	finally:
+		frappe.clear_messages()
+	if services is not None:
 		frappe.cache.set_value(key, services, expires_in_sec=RATE_CACHE_SECONDS)
-	allowed = allowed_services()
+	return services
+
+
+def checkout_options(provider: str, services: list[dict], currency: str | None) -> list[dict]:
+	s = frappe.get_cached_doc(provider)
+	allowed = allowed_services(s)
 	options = []
 	for service in services:
-		if allowed and service.get("service_code") not in allowed:
+		if allowed and not allowed & service_codes(service):
 			continue
+		amount = amount_in(service, currency)
+		if amount is None:
+			continue
+		service_id = cstr(service.get("service_id") or service.get("id"))
 		options.append(
 			{
-				"id": OPTION_PREFIX + service["service_id"],
+				"id": f"{frappe.scrub(provider)}:{service_id}",
 				"label": service_label(service),
-				"amount": flt(service.get("total_price"), 2),
+				"amount": amount,
 				"tax_included": bool(s.get("rates_include_tax")),
 				"carrier": service.get("carrier"),
 				"service": service.get("service_name"),
 				"meta": {
-					"service_id": service["service_id"],
+					"provider": provider,
+					"carrier": service.get("carrier"),
+					"service_id": service_id,
+					"service_name": service.get("service_name"),
 					"carrier_code": service.get("carrier_code"),
 					"service_code": service.get("service_code"),
-					"service_name": service.get("service_name"),
 				},
 			}
 		)
-	return {"options": options}
+	return options
+
+
+def amount_in(service: dict, currency: str | None) -> float | None:
+	"""The service's price in the store's currency, at ERPNext's exchange rate when the provider
+	quotes in another; None when there is no rate."""
+	amount = flt(service.get("total_price"))
+	quoted_in = service.get("currency")
+	if currency and quoted_in and quoted_in != currency:
+		from erpnext.setup.utils import get_exchange_rate
+
+		rate = flt(get_exchange_rate(quoted_in, currency))
+		frappe.clear_messages()
+		if not rate:
+			return None
+		amount *= rate
+	return flt(amount, 2)
 
 
 def service_label(service: dict) -> str:
@@ -139,14 +218,40 @@ def service_label(service: dict) -> str:
 	return name or carrier
 
 
-def allowed_services() -> set[str]:
-	return {line.strip() for line in (settings().get("checkout_services") or "").splitlines() if line.strip()}
+def allowed_services(provider_settings=None) -> set[str]:
+	s = provider_settings or settings()
+	return {line.strip() for line in (s.get("checkout_services") or "").splitlines() if line.strip()}
 
 
-def sender_address() -> frappe._dict:
-	from erpnext_shipping.erpnext_shipping.utils import get_address
+def service_codes(service: dict) -> set[str]:
+	return {cstr(service.get(field)) for field in ("service_code", "service_id", "id")} - {""}
 
-	return get_address(settings().sender_address)
+
+def origin_address(ship_from: str | None = None) -> frappe._dict | None:
+	"""Where a parcel leaves from: its store location's address, else Starshipit's Ship From Address."""
+	name = ship_from or settings().get("sender_address")
+	return get_address(name) if name else None
+
+
+def sender_address() -> frappe._dict | None:
+	return origin_address()
+
+
+def destination_address(address) -> frappe._dict:
+	return frappe._dict(
+		address_title=address.get("address_title") or "",
+		address_line1=address.address_line1,
+		address_line2=address.address_line2,
+		city=address.city,
+		state=address.state,
+		pincode=(address.pincode or "").replace(" ", ""),
+		country=address.country,
+		country_code=address.country_code or "",
+	)
+
+
+def content_description() -> str:
+	return settings().get("content_description") or _("Goods")
 
 
 def cart_lines(items: list[dict]) -> tuple[list[dict], list[str]]:
@@ -177,17 +282,40 @@ def cart_lines(items: list[dict]) -> tuple[list[dict], list[str]]:
 	return lines, restricted
 
 
-def cache_key(sender, destination, parcels) -> str:
+def cache_key(provider: str, origin, destination, parcels) -> str:
 	raw = json.dumps(
 		[
-			[sender.pincode, sender.city, sender.country],
+			provider,
+			[origin.address_line1, origin.city, origin.pincode, origin.country],
 			[destination.address_line1, destination.city, destination.pincode, destination.country],
 			parcels,
 		],
 		sort_keys=True,
 		default=str,
 	)
-	return "starshipit_rates:" + hashlib.sha256(raw.encode()).hexdigest()[:32]
+	return RATE_CACHE_PREFIX + hashlib.sha256(raw.encode()).hexdigest()[:32]
+
+
+def pickup_contact_user(warehouse: str | None = None) -> str | None:
+	"""Who hands parcels to the courier: the warehouse's Pickup Contact, else Starshipit's."""
+	user = None
+	if warehouse and frappe.get_meta("Warehouse").has_field("shipping_pickup_contact"):
+		user = frappe.db.get_value("Warehouse", warehouse, "shipping_pickup_contact")
+	return user or settings().get("pickup_contact")
+
+
+def user_contact(user: str | None) -> frappe._dict | None:
+	"""A user's details as providers take a pickup contact."""
+	if not user:
+		return None
+	contact = frappe.db.get_value(
+		"User", user, ["first_name", "last_name", "email", "phone", "mobile_no", "gender"], as_dict=True
+	)
+	if not contact:
+		return None
+	contact.email_id = contact.pop("email", None)
+	contact.phone = contact.phone or contact.mobile_no
+	return contact
 
 
 # --- fulfilment --------------------------------------------------------------------
@@ -198,24 +326,32 @@ except ImportError:  # Shop is not installed
 	FulfillmentProvider = object
 
 
-class StarshipitFulfillment(FulfillmentProvider):
-	key = "starshipit"
-	label = "Starshipit (Shipment)"
+class ShippingFulfillment(FulfillmentProvider):
+	"""A store parcel becomes a draft Shipment, to book with any enabled shipping provider."""
+
+	key = "erpnext_shipping"
+	label = "ERPNext Shipping (Shipment)"
+	shipping_providers = None  # every provider of this app
 
 	def is_configured(self) -> bool:
-		s = settings()
-		return bool(
-			s.enabled and s.get("sender_address") and s.get("pickup_contact") and pickup_phone_valid()
+		return any(
+			frappe.db.get_single_value(provider, "enabled")
+			for provider in self.shipping_providers or shipping_providers()
 		)
 
 	def setup_hint(self) -> str:
 		return _(
-			"Enable Starshipit and set the Ship From Address and a Pickup Contact whose phone starts with + and "
-			"the country code, in Starshipit settings."
-		)
+			"Enable a shipping provider ({0}), and give each warehouse a Pickup Contact whose phone starts "
+			"with + and the country code."
+		).format(", ".join(shipping_providers()))
 
-	def create_shipment(self, order, items: list[dict]) -> dict:
-		shipment = create_shipment_for_order(order.name)
+	def create_shipment(self, order, items: list[dict] | None = None, fulfillment=None) -> dict:
+		"""Deliver the parcel and make a draft Shipment for it.
+
+		Shop may pass the Shop Fulfillment being sent; when it doesn't, it is the latest Pending one
+		of this provider for the order (and the items' warehouse)."""
+		fulfillment = fulfillment or pending_fulfillment(order.name, self.key, items)
+		shipment = create_shipment_for_order(order.name, items, fulfillment)
 		return {
 			"status": "Accepted",
 			"external_id": shipment,
@@ -249,7 +385,7 @@ class StarshipitFulfillment(FulfillmentProvider):
 		return result
 
 	def cancel(self, fulfillment) -> dict:
-		"""Cancel the Shipment (and its Starshipit order) and put the stock back: an unbilled Delivery
+		"""Cancel the Shipment (and its provider's order) and put the stock back: an unbilled Delivery
 		Note is cancelled, an invoiced one is returned with ERPNext's return Delivery Note."""
 		name = fulfillment.external_id
 		if name and frappe.db.exists("Shipment", name):
@@ -259,7 +395,7 @@ class StarshipitFulfillment(FulfillmentProvider):
 				doc.delete(ignore_permissions=True)
 			elif doc.docstatus == 1:
 				doc.flags.ignore_permissions = True
-				doc.cancel()  # also deletes or archives the Starshipit order
+				doc.cancel()  # also deletes or archives a Starshipit order
 			for note in notes:
 				note_doc = frappe.get_doc("Delivery Note", note)
 				if note_doc.docstatus != 1:
@@ -272,9 +408,32 @@ class StarshipitFulfillment(FulfillmentProvider):
 		return {"status": "Cancelled"}
 
 
+class StarshipitFulfillment(ShippingFulfillment):
+	"""The same with Starshipit rates only, for stores and fulfilments set up with it."""
+
+	key = "starshipit"
+	label = "Starshipit (Shipment)"
+	shipping_providers = (STARSHIPIT_PROVIDER,)
+
+	def is_configured(self) -> bool:
+		s = settings()
+		return bool(
+			s.enabled and s.get("sender_address") and s.get("pickup_contact") and pickup_phone_valid()
+		)
+
+	def setup_hint(self) -> str:
+		return _(
+			"Enable Starshipit and set the Ship From Address and a Pickup Contact whose phone starts with + and "
+			"the country code, in Starshipit settings."
+		)
+
+
+FULFILLMENT_PROVIDERS = {provider.key: provider for provider in (ShippingFulfillment, StarshipitFulfillment)}
+
+
 def sync_store_fulfillment(shipment: str) -> None:
-	"""Bring the store's fulfilment of a Shipment up to date when Starshipit has news of it, so the
-	customer hears it has shipped or arrived without waiting for Shop's hourly sync."""
+	"""Bring the store's fulfilment of a Shipment up to date when its provider has news of it, so
+	the customer hears it has shipped or arrived without waiting for Shop's hourly sync."""
 	if "shop" not in frappe.get_installed_apps():
 		return
 	from shop.fulfillment import service
@@ -282,13 +441,47 @@ def sync_store_fulfillment(shipment: str) -> None:
 	for name in frappe.get_all(
 		"Shop Fulfillment",
 		filters={
-			"provider": StarshipitFulfillment.key,
+			"provider": ["in", list(FULFILLMENT_PROVIDERS)],
 			"external_id": shipment,
 			"status": ["in", ("Pending", "Accepted", "Shipped")],
 		},
 		pluck="name",
 	):
 		service.sync(name)
+
+
+def pending_fulfillment(order_name: str, provider_key: str, items: list[dict] | None = None):
+	"""The Shop Fulfillment being sent: the latest Pending one of this provider for the order, of
+	the items' warehouse when they name one."""
+	if not frappe.db.exists("DocType", "Shop Fulfillment"):
+		return None
+	filters = {"sales_order": order_name, "status": "Pending", "provider": provider_key}
+	warehouses = {row.get("warehouse") for row in items or []} - {None, ""}
+	if len(warehouses) == 1 and frappe.get_meta("Shop Fulfillment").has_field("warehouse"):
+		filters["warehouse"] = warehouses.pop()
+	name = frappe.db.get_value("Shop Fulfillment", filters, "name", order_by="creation desc")
+	return frappe.get_doc("Shop Fulfillment", name) if name else None
+
+
+def parcel_of(fulfillment, items: list[dict] | None) -> frappe._dict:
+	"""The parcel being sent: its items, warehouse, Ship From Address and the shopper's choice."""
+	fulfillment = fulfillment or frappe._dict()
+	if not items and fulfillment.get("items"):
+		items = [
+			{"item_code": row.item_code, "item_name": row.item_name, "qty": flt(row.qty)}
+			for row in fulfillment.get("items")
+		]
+	items = [frappe._dict(row) for row in items or []]
+	warehouse = fulfillment.get("warehouse") or next(
+		(row.warehouse for row in items if row.get("warehouse")), None
+	)
+	return frappe._dict(
+		lines=items,
+		warehouse=warehouse,
+		ship_from=fulfillment.get("ship_from_address"),
+		shipping_option=fulfillment.get("shipping_option"),
+		shipment=fulfillment.get("external_id"),
+	)
 
 
 def return_note(delivery_note: str) -> str:
@@ -302,32 +495,43 @@ def return_note(delivery_note: str) -> str:
 	return returned.name
 
 
-def create_shipment_for_order(order_name: str) -> str:
-	"""Deliver the order and make a draft Shipment for it. Returns the Shipment name."""
+def create_shipment_for_order(order_name: str, items: list[dict] | None = None, fulfillment=None) -> str:
+	"""Deliver a store order, or one parcel of it, and make a draft Shipment for it. Returns the
+	Shipment name.
+
+	A parcel (its fulfilment or items name a warehouse) has only its items delivered, from that
+	warehouse, and is picked up from its Ship From Address. Without one the whole order is
+	delivered, as for orders sent before fulfilment locations."""
 	from erpnext.stock.doctype.delivery_note.delivery_note import make_shipment
 
-	existing = (
-		frappe.db.get_value(
-			"Shipment Delivery Note",
-			{"delivery_note": ["in", delivery_notes(order_name)], "docstatus": ["<", 2]},
-			"parent",
+	parcel = parcel_of(fulfillment, items)
+	if parcel.warehouse:
+		if parcel.shipment and frappe.db.get_value("Shipment", parcel.shipment, "docstatus") in (0, 1):
+			return parcel.shipment
+		delivery_note = deliver_items(order_name, parcel.lines, parcel.warehouse)
+	else:
+		existing = (
+			frappe.db.get_value(
+				"Shipment Delivery Note",
+				{"delivery_note": ["in", delivery_notes(order_name)], "docstatus": ["<", 2]},
+				"parent",
+			)
+			if delivery_notes(order_name)
+			else None
 		)
-		if delivery_notes(order_name)
-		else None
-	)
-	if existing:
-		return existing
-	delivery_note = deliver(order_name)
-	s = settings()
+		if existing:
+			return existing
+		delivery_note = deliver(order_name)
+	pickup_user = pickup_contact_user(parcel.warehouse)
 	shipment = make_shipment(delivery_note)
 	shipment.pickup_from_type = "Company"
-	shipment.pickup_address_name = s.sender_address
-	shipment.pickup_contact_person = s.pickup_contact
-	set_pickup_contact(shipment, s.pickup_contact)
+	shipment.pickup_address_name = parcel.ship_from or settings().get("sender_address")
+	shipment.pickup_contact_person = pickup_user
+	set_pickup_contact(shipment, pickup_user)
 	shipment.pickup_date = next_business_day()
-	shipment.description_of_content = s.get("content_description") or _("Goods")
+	shipment.description_of_content = content_description()
 	shipment.parcel_template = None
-	choice = chosen_service(order_name)
+	choice = chosen_service(parcel.shipping_option or order_shipping_option(order_name))
 	if choice:
 		shipment.preferred_service = json.dumps(choice)
 	shipment.flags.ignore_permissions = True
@@ -357,11 +561,11 @@ def set_pickup_contact(shipment, user: str | None) -> None:
 	shipment.pickup_contact_email = contact.email
 
 
-def pickup_phone_valid() -> bool:
+def pickup_phone_valid(user: str | None = None) -> bool:
 	"""The pickup contact's phone is in the form a Shipment needs: + and the country code."""
 	import re
 
-	phone = frappe.db.get_value("User", settings().get("pickup_contact"), "phone")
+	phone = frappe.db.get_value("User", user or settings().get("pickup_contact"), "phone")
 	return bool(phone and re.match(r"^\+(?![\s0])[\d\s]+\d$", phone))
 
 
@@ -374,16 +578,20 @@ def delivery_notes(order_name: str) -> list[str]:
 	)
 
 
+def make_delivery_note(order_name: str):
+	try:
+		from shop.compat import make_delivery_note
+	except ImportError:
+		from erpnext.selling.doctype.sales_order.sales_order import make_delivery_note
+	return make_delivery_note(order_name)
+
+
 def deliver(order_name: str) -> str:
 	"""A submitted Delivery Note for what the order still has to deliver; when it is all delivered,
 	its latest Delivery Note."""
 	existing = delivery_notes(order_name)
 	if existing and flt(frappe.db.get_value("Sales Order", order_name, "per_delivered")) >= 100:
 		return existing[-1]
-	try:
-		from shop.compat import make_delivery_note
-	except ImportError:
-		from erpnext.selling.doctype.sales_order.sales_order import make_delivery_note
 	note = make_delivery_note(order_name)
 	note.flags.ignore_permissions = True
 	note.insert(ignore_permissions=True)
@@ -391,27 +599,94 @@ def deliver(order_name: str) -> str:
 	return note.name
 
 
-def chosen_service(order_name: str) -> dict | None:
-	raw = (
-		frappe.db.get_value("Sales Order", order_name, "shop_shipping_option")
-		if frappe.get_meta("Sales Order").has_field("shop_shipping_option")
-		else None
-	)
-	if not raw:
+def deliver_items(order_name: str, items: list[dict], warehouse: str | None = None) -> str:
+	"""A submitted Delivery Note for one parcel of the order: only these items, from their warehouse.
+
+	Each item's quantity is taken from the order's lines still to deliver, lines of the same
+	warehouse first."""
+	note = make_delivery_note(order_name)
+	remaining = {row.idx: flt(row.qty) for row in note.items}
+	taken = {}
+	for item in items:
+		item = frappe._dict(item)
+		source = item.get("warehouse") or warehouse
+		qty = flt(item.qty)
+		rows = [row for row in note.items if row.item_code == item.item_code]
+		rows.sort(key=lambda row: row.warehouse != source)
+		for row in rows:
+			if qty <= 0:
+				break
+			share = min(qty, remaining[row.idx])
+			if share <= 0:
+				continue
+			remaining[row.idx] -= share
+			qty -= share
+			taken.setdefault(row.idx, [0.0, source])[0] += share
+		if qty > 0:
+			frappe.throw(
+				_("{0} of {1} is not left to deliver on Sales Order {2}").format(
+					qty, frappe.bold(item.get("item_name") or item.item_code), order_name
+				)
+			)
+	if not taken:
+		frappe.throw(_("Nothing in this parcel is left to deliver on Sales Order {0}").format(order_name))
+	rows = []
+	for row in note.items:
+		if row.idx not in taken:
+			continue
+		row.qty, source = taken[row.idx]
+		row.stock_qty = flt(row.qty) * flt(row.conversion_factor or 1)
+		if source:
+			row.warehouse = source
+		rows.append(row)
+	note.set("items", rows)
+	if warehouse and note.get("set_warehouse"):
+		note.set_warehouse = warehouse
+	note.flags.ignore_permissions = True
+	note.insert(ignore_permissions=True)
+	note.submit()
+	return note.name
+
+
+def order_shipping_option(order_name: str) -> str | None:
+	"""The shipping option the shopper chose for the whole order, before fulfilment locations."""
+	if not frappe.get_meta("Sales Order").has_field("shop_shipping_option"):
 		return None
-	try:
-		option = json.loads(raw)
-	except ValueError:
+	return frappe.db.get_value("Sales Order", order_name, "shop_shipping_option")
+
+
+def option_provider(option: dict) -> str | None:
+	"""The shipping provider whose service a checkout option is, from its meta or its id's prefix."""
+	providers = shipping_providers()
+	provider = (option.get("meta") or {}).get("provider")
+	if provider in providers:
+		return provider
+	prefix = cstr(option.get("id")).split(":", 1)[0]
+	return next((name for name in providers if frappe.scrub(name) == prefix), None)
+
+
+def chosen_service(option) -> dict | None:
+	"""What a Shipment keeps of the shopper's choice: its label and price and, for a provider's
+	service, which provider and service it is."""
+	if isinstance(option, str):
+		try:
+			option = json.loads(option)
+		except ValueError:
+			return None
+	if not isinstance(option, dict) or not option:
 		return None
-	if not str(option.get("id") or "").startswith(OPTION_PREFIX):
-		return {"label": option.get("label"), "amount": option.get("amount")}
+	choice = {"label": option.get("label"), "amount": option.get("amount")}
+	provider = option_provider(option)
+	if not provider:
+		return choice
 	meta = option.get("meta") or {}
-	return {
-		"label": option.get("label"),
-		"amount": option.get("amount"),
-		"service_id": meta.get("service_id"),
-		"service_name": meta.get("service_name"),
-	}
+	choice.update(
+		provider=provider,
+		carrier=meta.get("carrier") or option.get("carrier"),
+		service_id=meta.get("service_id"),
+		service_name=meta.get("service_name"),
+	)
+	return choice
 
 
 def next_business_day(start: str | None = None) -> str:
@@ -436,10 +711,18 @@ def mark_preferred(services: list[dict], shipment: str | None) -> list[dict]:
 		choice = json.loads(raw)
 	except ValueError:
 		return services
+	# choices saved before other providers quoted at checkout were Starshipit's
+	provider = choice.get("provider") or STARSHIPIT_PROVIDER
+	service_id = cstr(choice.get("service_id"))
 	for service in services:
-		if service.get("service_provider") == STARSHIPIT_PROVIDER and (
-			service.get("service_id") == choice.get("service_id")
-			or (choice.get("service_name") and service.get("service_name") == choice.get("service_name"))
-		):
+		if service.get("service_provider") != provider:
+			continue
+		if service_id:
+			matches = cstr(service.get("service_id") or service.get("id")) == service_id
+		else:
+			matches = (
+				bool(choice.get("service_name")) and service.get("service_name") == choice["service_name"]
+			)
+		if matches:
 			service["is_preferred"] = 1
 	return services
