@@ -350,7 +350,8 @@ class TestStarshipit(IntegrationTestCase):
 			"packages": [{"package_id": 81, "weight": 0.5}, {"package_id": 82, "weight": 0.5}],
 		}
 		request.side_effect = [*found(existing), response({"order": {"order_id": 555}, "success": True})]
-		info = self.create(request, self.shipment())
+		# booked before (its order id is on the Shipment), and booked again
+		info = self.create(request, self.shipment(shipment_id="555"))
 		# one update that replaces rows by id (rows without an id would be added) and sets the courier
 		self.assertEqual(calls(request), [("GET", "/orders/search"), ("GET", "/orders"), ("PUT", "/orders")])
 		order = request.call_args.kwargs["json"]["order"]
@@ -428,13 +429,33 @@ class TestStarshipit(IntegrationTestCase):
 			"carrier_service_code": "Plain Label",
 		}
 		request.side_effect = found(printed)
-		info = self.create(request, self.shipment())
+		info = self.create(request, self.shipment(shipment_id="556"))
 		self.assertEqual(calls(request), [("GET", "/orders/search"), ("GET", "/orders")])
 		self.assertEqual(info["shipment_id"], "556")
 		# another service can't be set once the label is printed
 		request.side_effect = found(dict(printed, carrier_service_code="Express"))
 		with self.assertRaises(frappe.ValidationError):
+			self.create(request, self.shipment(shipment_id="556"))
+
+	@patch(REQUESTS)
+	def test_another_order_with_the_same_number_is_never_taken_over(self, request):
+		# a delivered order of another site (or of a Shipment whose number was used again)
+		theirs = {"order_id": 900, "status": "Delivered", "destination": {"name": "Someone Else"}}
+		request.side_effect = found(theirs)
+		with self.assertRaises(frappe.ValidationError):
 			self.create(request, self.shipment())
+		self.assertNotIn(("PUT", "/orders"), calls(request))
+
+	def test_an_order_a_timed_out_booking_made_is_the_shipments_own(self):
+		from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import own_order
+
+		ours = {"reference": "DN-1", "destination": {"name": "Ann", "street": "1 Road", "post_code": "9016"}}
+		just_made = dict(ours, order_id=901, status="Saved")
+		self.assertTrue(own_order(self.shipment(), just_made, ours))
+		elsewhere = dict(just_made, destination=dict(ours["destination"], street="2 Other Road"))
+		self.assertFalse(own_order(self.shipment(), elsewhere, ours))
+		self.assertFalse(own_order(self.shipment(), dict(just_made, status="Printed"), ours))
+		self.assertTrue(own_order(self.shipment(shipment_id="901"), dict(just_made, status="Printed"), ours))
 
 	@patch(REQUESTS)
 	def test_a_failed_lookup_is_not_taken_for_a_missing_order(self, request):
@@ -637,13 +658,13 @@ class TestStarshipit(IntegrationTestCase):
 		from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import cancel_shipment_order
 
 		shipment = self.shipment(service_provider=STARSHIPIT_PROVIDER, shipment_id="123")
-		request.side_effect = [response({"orders": [], "success": True})]
+		request.side_effect = [response({"success": False, "errors": [{"message": "Not found"}]}, status=404)]
 		cancel_shipment_order(shipment)
-		self.assertEqual(calls(request), [("GET", "/orders/search")])
+		self.assertEqual(calls(request), [("GET", "/orders")])
 
 		unshipped = {"order_id": 123, "status": "Unshipped"}
 		request.side_effect = [
-			*found(unshipped),
+			response({"order": unshipped, "success": True}),
 			response({"order": unshipped, "success": True}),
 			response({"success": True}),
 		]
@@ -659,7 +680,10 @@ class TestStarshipit(IntegrationTestCase):
 
 		shipment = self.shipment(service_provider=STARSHIPIT_PROVIDER, shipment_id="123")
 		unshipped = {"order_id": 123, "status": "Unshipped"}
-		request.side_effect = [*found(unshipped), response({"order": unshipped, "success": True})]
+		request.side_effect = [
+			response({"order": unshipped, "success": True}),
+			response({"order": unshipped, "success": True}),
+		]
 		cancel_shipment_order(shipment)
 		frappe.db.after_commit.reset()  # what a rollback does
 		self.assertNotIn(("DELETE", "/orders/delete"), calls(request))

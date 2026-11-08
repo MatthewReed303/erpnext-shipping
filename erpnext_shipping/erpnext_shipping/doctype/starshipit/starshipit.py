@@ -308,6 +308,17 @@ class StarshipitUtils:
 			"packages": self.packages(parcels),
 		}
 		existing = self.find_order(shipment)
+		if existing and not own_order(shipment_doc, existing, order):
+			# Shipment names can repeat (a deleted draft, a restored backup, another site on the same
+			# Starshipit account): an order that isn't this Shipment's is never taken over
+			frappe.throw(
+				_(
+					"Starshipit already has another order numbered {0} (order {1}, {2}). Archive it in Starshipit, then book this Shipment again."
+				).format(
+					frappe.bold(shipment), existing.get("order_id"), existing.get("status") or _("no status")
+				),
+				title=_("Starshipit"),
+			)
 		if existing and cstr(existing.get("status")).lower() not in UNPRINTED_STATUSES:
 			# Starshipit doesn't change an order once its label is printed
 			chosen = tuple(cstr(code) for code in split_service_id(service_info))
@@ -518,13 +529,34 @@ class StarshipitUtils:
 	# --- Status ---------------------------------------------------------------
 
 	def get_tracking_data(self, order_number: str) -> dict | None:
-		"""Status of the Starshipit order: courier tracking when there is any, else the order status."""
-		order = self.find_order(order_number)
+		"""Status of the Starshipit order: courier tracking when there is any, else the order status.
+		The Shipment's own order (by its id) is read, as another order can have the same number."""
+		order_id, awb_number = frappe.db.get_value(
+			"Shipment", order_number, ["shipment_id", "awb_number"]
+		) or (
+			None,
+			None,
+		)
+		if order_id:
+			try:
+				order = self.request(
+					"GET", "/orders", params={"order_id": cint(order_id)}, log_errors=False
+				).get("order")
+			except frappe.ValidationError:
+				frappe.clear_messages()
+				order = None
+		else:
+			order = self.find_order(order_number)
 		if not order:
 			return None
 		tracking = {}
+		track_by = (
+			{"tracking_number": cstr(awb_number).split(",")[0].strip()}
+			if awb_number
+			else {"order_number": order_number}
+		)
 		try:
-			response = self.request("GET", "/track", params={"order_number": order_number}, log_errors=False)
+			response = self.request("GET", "/track", params=track_by, log_errors=False)
 			tracking = tracking_result(response.get("results"), order_number)
 		except frappe.ValidationError:
 			frappe.clear_messages()
@@ -599,6 +631,21 @@ def rate_address(address) -> dict:
 		"post_code": address.pincode,
 		"country_code": address.country_code.upper(),
 	}
+
+
+def own_order(shipment_doc, existing: dict, order: dict) -> bool:
+	"""Whether a Starshipit order with the Shipment's number is the Shipment's own: the one booked
+	for it, or one a timed-out booking just made (no label yet, same reference and destination)."""
+	if shipment_doc.get("shipment_id"):
+		return cstr(existing.get("order_id")) == cstr(shipment_doc.shipment_id)
+	if cstr(existing.get("status")).lower() not in UNPRINTED_STATUSES:
+		return False
+	theirs, ours = existing.get("destination") or {}, order.get("destination") or {}
+	same_place = all(
+		cstr(theirs.get(field)).strip().lower() == cstr(ours.get(field)).strip().lower()
+		for field in ("name", "street", "post_code")
+	)
+	return same_place and cstr(existing.get("reference")) == cstr(order.get("reference"))
 
 
 def party(address, contact, company_name: str | None = None) -> dict:
@@ -907,7 +954,14 @@ def cancel_shipment_order(doc, method=None):
 	# cancel is saved, so a cancel that is then rolled back (e.g. a store cancel failing later)
 	# leaves the Starshipit order as it was
 	utils = StarshipitUtils()
-	if not utils.find_order(doc.name):
+	try:
+		order = utils.request(
+			"GET", "/orders", params={"order_id": cint(doc.shipment_id)}, log_errors=False
+		).get("order")
+	except frappe.ValidationError:
+		frappe.clear_messages()
+		order = None
+	if not order or order.get("archived"):
 		# gone already: removed in Starshipit, or by a cancel here that was then undone
 		return
 	printed = utils.already_printed(doc)
@@ -992,6 +1046,12 @@ def webhook(token: str | None = None):
 		if latest and updated < latest:
 			return {"ok": True, "matched": True, "stale": True}
 		frappe.cache.set_value(key, updated, expires_in_sec=60 * 60 * 24 * 90)
+
+	tracking_number = cstr(payload.get("tracking_number"))
+	stored = cstr(frappe.db.get_value("Shipment", shipment, "awb_number"))
+	if tracking_number and stored and tracking_number not in [n.strip() for n in stored.split(",")]:
+		# another order with the same number (another site or channel on the account)
+		return {"ok": True, "matched": False}
 
 	status = payload.get("tracking_status")
 	data = {
