@@ -132,18 +132,24 @@ def update_tracking_info_daily():
 		},
 	)
 	for shipment in shipments:
-		shipment_doc = frappe.get_doc("Shipment", shipment.name)
-		tracking_info = update_tracking(
-			shipment.name,
-			shipment_doc.service_provider,
-			shipment_doc.shipment_id,
-			shipment_doc.shipment_delivery_note,
-		)
+		# one Shipment failing (a provider switched off, a timeout) doesn't stop the others
+		try:
+			shipment_doc = frappe.get_doc("Shipment", shipment.name)
+			tracking_info = update_tracking(
+				shipment.name,
+				shipment_doc.service_provider,
+				shipment_doc.shipment_id,
+				shipment_doc.shipment_delivery_note,
+			)
 
-		if tracking_info:
-			fields = ["awb_number", "tracking_status", "tracking_status_info", "tracking_url"]
-			for field in fields:
-				shipment_doc.db_set(field, tracking_info.get(field))
+			if tracking_info:
+				fields = ["awb_number", "tracking_status", "tracking_status_info", "tracking_url"]
+				for field in fields:
+					shipment_doc.db_set(field, tracking_info.get(field))
+			frappe.db.commit()
+		except Exception:
+			frappe.db.rollback()
+			frappe.log_error(title=f"Could not update tracking for {shipment.name}")
 
 
 def fill_parcels_from_items(doc, method=None):

@@ -237,7 +237,10 @@ def print_shipping_label(shipment: str):
 			file_url = save_label_as_attachment(shipment, content, i)
 			shipping_label.append(file_url)
 	elif service_provider == STARSHIPIT_PROVIDER:
-		from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import attach_pdf, refresh_status
+		from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import (
+			attach_pdf,
+			refresh_status_quietly,
+		)
 
 		labels, tracking_numbers = StarshipitUtils().print_label(shipment_doc)
 		shipping_label = [
@@ -245,7 +248,8 @@ def print_shipping_label(shipment: str):
 		]
 		if tracking_numbers and not shipment_doc.awb_number:
 			shipment_doc.db_set("awb_number", ", ".join(tracking_numbers))
-		refresh_status(shipment)
+		# the label is bought: a failed status check after it mustn't undo its record
+		refresh_status_quietly(shipment)
 		for row in shipment_doc.shipment_delivery_note:
 			for file_url in shipping_label:
 				attach_existing_file(file_url, "Delivery Note", row.delivery_note)

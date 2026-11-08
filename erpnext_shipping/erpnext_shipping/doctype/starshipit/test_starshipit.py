@@ -598,8 +598,9 @@ class TestStarshipit(IntegrationTestCase):
 		self.assertEqual(StarshipitUtils().book_pickup(shipment, "Side door"), "4500")
 		self.assertEqual(calls(request)[-1], ("POST", "/pickup/book"))
 		payload = request.call_args.kwargs["json"]
-		# the carrier enum code; Book Pickup also accepts the display name, the code is unambiguous
-		self.assertEqual(payload["carrier_name"], "Fastways")
+		# the courier's name, as Book Pickup's documented example has it (not the carrier code)
+		self.assertEqual(payload["carrier_name"], "Aramex")
+		self.assertNotIn("shipment_ids", payload)
 		self.assertEqual(payload["tracking_number"], "TN9")
 		self.assertEqual(payload["pickup_timeslot_start"], "2026-11-09T20:00:00Z")
 		self.assertEqual(payload["pickup_timeslot_end"], "2026-11-09T23:00:00Z")
@@ -708,6 +709,38 @@ class TestStarshipit(IntegrationTestCase):
 		signature = hmac.new(b"s3cret", body, hashlib.sha256).hexdigest()
 		self.webhook_request(body, headers={"X-Starshipit-Signature": signature})
 		self.assertEqual(webhook(), {"ok": True, "matched": False})
+
+	def test_an_older_webhook_event_is_dropped(self):
+		from erpnext_shipping.erpnext_shipping.doctype.starshipit import starshipit
+
+		frappe.cache.delete_value("starshipit:last_event:SHIP-TEST-1")
+		token = frappe.db.get_single_value("Starshipit", "webhook_token")
+
+		def event(status, updated):
+			body = {"order_number": "SHIP-TEST-1", "tracking_status": status, "last_updated_date": updated}
+			self.webhook_request(json.dumps(body).encode(), {"token": token})
+			original_get_value = frappe.db.get_value
+			with (
+				patch(
+					"frappe.db.get_value",
+					side_effect=lambda doctype, *a, **k: (
+						"SHIP-TEST-1"
+						if doctype == "Shipment" and isinstance(a[0], dict)
+						else original_get_value(doctype, *a, **k)
+					),
+				),
+				patch.object(starshipit, "apply_status") as apply,
+				patch("frappe.enqueue") as enqueue,
+			):
+				result = starshipit.webhook()
+			return result, apply, enqueue
+
+		result, apply, enqueue = event("InTransit", "2026-11-09T10:00:00Z")
+		apply.assert_called_once()
+		self.assertEqual(enqueue.call_args.kwargs["job_id"], "starshipit-status-SHIP-TEST-1")
+		result, apply, _enqueue = event("Printed", "2026-11-09T08:00:00Z")
+		self.assertTrue(result.get("stale"))
+		apply.assert_not_called()
 
 	def box(self, name, length, width, height, weight):
 		if not frappe.db.exists("Shipment Parcel Template", name):
@@ -952,6 +985,43 @@ class TestStarshipitStore(IntegrationTestCase):
 			)
 		self.assertNotIn("tracking_status", set_value.call_args.args[2])
 		self.assertEqual(update.call_args.kwargs["tracking_info"], stored)
+
+	def test_requests_take_turns_across_workers(self):
+		from erpnext_shipping.erpnext_shipping.doctype.starshipit import starshipit
+
+		key = frappe.cache.make_key(starshipit.PACING_KEY)
+		frappe.cache.delete(key)
+		starshipit.wait_for_turn()
+		# another worker's request holds the slot, read from Redis rather than this worker's memory
+		self.assertTrue(frappe.cache.pttl(key) > 0)
+		with patch("time.sleep") as sleep:
+			sleep.side_effect = lambda seconds: frappe.cache.delete(key)
+			starshipit.wait_for_turn()
+		sleep.assert_called_once()
+
+	def test_a_pickup_is_booked_once_a_day(self):
+		from erpnext_shipping.erpnext_shipping.doctype.starshipit import starshipit
+
+		shipment = frappe._dict(name="SHIP-TEST-1", pickup_date="2026-11-10")
+		booked = (
+			"Pickup booked for " + frappe.format("2026-11-10", {"fieldtype": "Date"}) + ", 08:00 to 12:00"
+		)
+		original_get_value = frappe.db.get_value
+		with (
+			patch.object(starshipit, "get_starshipit_shipment", return_value=shipment),
+			patch(
+				"frappe.db.get_value",
+				side_effect=lambda doctype, *a, **k: (
+					booked
+					if doctype == "Comment"
+					else ("SHIP-TEST-1" if doctype == "Shipment" else original_get_value(doctype, *a, **k))
+				),
+			),
+			patch.object(starshipit.StarshipitUtils, "book_pickup") as book,
+			self.assertRaises(frappe.ValidationError),
+		):
+			starshipit.book_pickup("SHIP-TEST-1")
+		book.assert_not_called()
 
 	def test_store_fulfilment_follows_a_status_update_at_once(self):
 		if "shop" not in frappe.get_installed_apps():

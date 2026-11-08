@@ -494,7 +494,7 @@ class StarshipitUtils:
 		payload = {
 			"order_reference": shipment_doc.name,
 			"tracking_number": cstr(shipment_doc.awb_number).split(",")[0].strip(),
-			"carrier_name": order_carrier(order) or order.get("carrier_name") or shipment_doc.carrier,
+			"carrier_name": order.get("carrier_name") or shipment_doc.carrier,
 			"service_code": order.get("carrier_service_code"),
 			"pickup_timeslot_start": local_to_utc(shipment_doc.pickup_date, shipment_doc.pickup_from, zone),
 			"pickup_timeslot_end": local_to_utc(shipment_doc.pickup_date, shipment_doc.pickup_to, zone),
@@ -509,7 +509,6 @@ class StarshipitUtils:
 			"max_package_length": max((flt(p.get("length")) * 100 for p in packages), default=0),
 			"max_package_width": max((flt(p.get("width")) * 100 for p in packages), default=0),
 			"max_package_height": max((flt(p.get("height")) * 100 for p in packages), default=0),
-			"shipment_ids": [cint(shipment_doc.shipment_id)],
 		}
 		if WINDOWS_TIMEZONES.get(zone):
 			payload["pickup_timezone_id"] = WINDOWS_TIMEZONES[zone]
@@ -536,12 +535,14 @@ class StarshipitUtils:
 
 
 def wait_for_turn() -> None:
-	"""Keep to the API's request rate across every worker on the site."""
-	last = frappe.utils.flt(frappe.cache.get_value(PACING_KEY))
-	wait = MIN_REQUEST_INTERVAL - (time.time() - last)
-	if wait > 0:
-		time.sleep(wait)
-	frappe.cache.set_value(PACING_KEY, time.time(), expires_in_sec=5)
+	"""Keep to the API's request rate across every worker on the site: each request first takes a
+	slot in Redis that lasts the minimum interval, set only if no other request holds it."""
+	key = frappe.cache.make_key(PACING_KEY)
+	interval = int(MIN_REQUEST_INTERVAL * 1000)
+	for _attempt in range(600):
+		if frappe.cache.set(key, 1, nx=True, px=interval):
+			return
+		time.sleep(max(cint(frappe.cache.pttl(key)), 10) / 1000)
 
 
 def sync_rows(rows: list[dict], existing: list[dict] | None, id_field: str) -> list[dict]:
@@ -683,7 +684,10 @@ def order_items(shipment_doc, description_of_content: str | None, value_of_goods
 			if tariff_code:
 				line["tariff_code"] = cstr(tariff_code)[:18]
 			if origin:
-				line["country_of_origin"] = cstr(origin)[:50]
+				# Starshipit takes the ISO code (AU), ERPNext keeps the country's name
+				line["country_of_origin"] = cstr(
+					frappe.db.get_value("Country", origin, "code") or origin
+				).upper()[:50]
 			items.append(line)
 	if not items:
 		items.append(
@@ -816,13 +820,26 @@ def refresh_status(shipment: str) -> dict | None:
 	return data
 
 
+def refresh_status_quietly(shipment: str) -> None:
+	"""Refresh the status after something Starshipit has already done (a label bought, a manifest
+	made): a failed refresh is logged, and doesn't undo the record of what was done."""
+	frappe.db.savepoint("starshipit_refresh")
+	try:
+		refresh_status(shipment)
+	except Exception:
+		frappe.db.rollback(save_point="starshipit_refresh")
+		frappe.clear_messages()
+		frappe.log_error(title=f"Starshipit status refresh failed for {shipment}")
+
+
 @frappe.whitelist()
 def manifest_shipment(shipment: str) -> str | None:
 	doc = get_starshipit_shipment(shipment)
 	pdf = StarshipitUtils().manifest(doc)
 	doc.add_comment("Info", _("Manifested in Starshipit."))
-	refresh_status(doc.name)
-	return attach_pdf(doc.name, "manifest", pdf) if pdf else None
+	file_url = attach_pdf(doc.name, "manifest", pdf) if pdf else None
+	refresh_status_quietly(doc.name)
+	return file_url
 
 
 @frappe.whitelist()
@@ -834,6 +851,21 @@ def book_pickup(
 	special_instructions: str | None = None,
 ) -> str:
 	doc = get_starshipit_shipment(shipment)
+	# a double click or a retry after a timeout would book (and pay for) a second pickup
+	frappe.db.get_value("Shipment", doc.name, "name", for_update=True)
+	booked = frappe.db.get_value(
+		"Comment",
+		{
+			"reference_doctype": "Shipment",
+			"reference_name": doc.name,
+			"comment_type": "Info",
+			"content": ["like", "Pickup booked for %"],
+		},
+		"content",
+		order_by="creation desc",
+	)
+	if booked and frappe.format(pickup_date or doc.pickup_date, {"fieldtype": "Date"}) in booked:
+		frappe.throw(_("A pickup is already booked for this date: {0}").format(booked), title=_("Starshipit"))
 	if pickup_date or pickup_from or pickup_to:
 		# pickup fields can be changed after submit; saving runs ERPNext's pickup time checks
 		doc.pickup_date = pickup_date or doc.pickup_date
@@ -928,11 +960,17 @@ def webhook(token: str | None = None):
 		"name",
 	)
 	if not shipment:
-		frappe.log_error(
-			title="Starshipit webhook: no matching Shipment",
-			message=json.dumps(payload, indent=1, default=str),
-		)
+		# an order from another channel on the same Starshipit account
 		return {"ok": True, "matched": False}
+
+	# events can arrive late or twice; one older than the last one handled is dropped
+	updated = cstr(payload.get("last_updated_date"))
+	key = f"starshipit:last_event:{shipment}"
+	if updated:
+		latest = cstr(frappe.cache.get_value(key, use_local_cache=False))
+		if latest and updated < latest:
+			return {"ok": True, "matched": True, "stale": True}
+		frappe.cache.set_value(key, updated, expires_in_sec=60 * 60 * 24 * 90)
 
 	status = payload.get("tracking_status")
 	data = {
@@ -946,5 +984,11 @@ def webhook(token: str | None = None):
 	if not frappe.db.get_value("Shipment", shipment, "tracking_url"):
 		# the webhook carries no tracking URL; fetch it after answering, as Starshipit recommends
 		method = "erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit.refresh_status"
-	frappe.enqueue(method, shipment=shipment, enqueue_after_commit=True)
+	frappe.enqueue(
+		method,
+		shipment=shipment,
+		job_id=f"starshipit-status-{shipment}",
+		deduplicate=True,
+		enqueue_after_commit=True,
+	)
 	return {"ok": True, "matched": True}
