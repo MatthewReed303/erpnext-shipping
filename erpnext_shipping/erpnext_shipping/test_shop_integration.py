@@ -727,3 +727,77 @@ class TestStoreFulfillment(StoreTestCase):
 		with patch("shop.fulfillment.service.sync") as sync:
 			si.sync_store_fulfillment(shipment)
 		sync.assert_called_once_with(records[self.south].name)
+
+	def booked(self, order, qty=2):
+		"""A parcel's Shipment, submitted and booked with Starshipit but without a label."""
+		items, fulfillment = self.parcel(self.north, self.item, qty, self.north_address, self.option())
+		name = si.StarshipitFulfillment().create_shipment(order, items, fulfillment)["external_id"]
+		doc = frappe.get_doc("Shipment", name)
+		doc.flags.ignore_permissions = True
+		doc.submit()
+		doc.db_set({"service_provider": "Starshipit", "shipment_id": "321"})
+		return doc
+
+	def in_stock(self) -> float:
+		return (
+			frappe.db.get_value("Bin", {"item_code": self.item, "warehouse": self.north}, "actual_qty") or 0
+		)
+
+	@patch(REQUEST)
+	def test_a_booked_parcel_is_cancelled_with_its_starshipit_order(self, request):
+		frappe.db.set_single_value("Starshipit", "enabled", 1)
+		order = self.order((self.item, 2, self.north))
+		stock = self.in_stock()
+		shipment = self.booked(order)
+		note = shipment.shipment_delivery_note[0].delivery_note
+		self.assertEqual(self.in_stock(), stock - 2)
+		request.return_value = MagicMock(
+			status_code=200,
+			ok=True,
+			json=MagicMock(return_value={"order": {"order_id": 321, "status": "Unshipped"}, "success": True}),
+		)
+		si.StarshipitFulfillment().cancel(frappe._dict(external_id=shipment.name))
+		self.assertEqual(frappe.db.get_value("Shipment", shipment.name, "docstatus"), 2)
+		self.assertEqual(frappe.db.get_value("Delivery Note", note, "docstatus"), 2)
+		self.assertEqual(self.in_stock(), stock)
+		# Starshipit is asked about the order now, and it is removed once the cancel is saved
+		self.assertEqual(request.call_args.args[:2], ("GET", "https://api.starshipit.com/api/orders"))
+		self.assertTrue(frappe.db.after_commit._functions)
+		frappe.db.after_commit.reset()
+
+	def test_an_invoiced_parcel_is_returned_and_its_invoice_kept(self):
+		from erpnext.stock.doctype.delivery_note.delivery_note import make_sales_invoice
+
+		order = self.order((self.item, 2, self.north))
+		stock = self.in_stock()
+		items, fulfillment = self.parcel(self.north, self.item, 2, self.north_address)
+		shipment = si.ShippingFulfillment().create_shipment(order, items, fulfillment)["external_id"]
+		note = frappe.db.get_value("Shipment Delivery Note", {"parent": shipment}, "delivery_note")
+		invoice = make_sales_invoice(note)
+		invoice.insert(ignore_permissions=True)
+		invoice.submit()
+
+		si.ShippingFulfillment().cancel(frappe._dict(external_id=shipment))
+		self.assertFalse(frappe.db.exists("Shipment", shipment))
+		self.assertEqual(frappe.db.get_value("Delivery Note", note, "docstatus"), 1)
+		self.assertEqual(frappe.db.get_value("Sales Invoice", invoice.name, "docstatus"), 1)
+		returns = frappe.get_all(
+			"Delivery Note",
+			filters={"is_return": 1, "return_against": note, "docstatus": 1},
+			fields=["name"],
+		)
+		self.assertEqual(len(returns), 1)
+		self.assertEqual(frappe.db.get_value("Delivery Note Item", {"parent": returns[0].name}, "qty"), -2)
+		self.assertEqual(self.in_stock(), stock)
+
+	def test_a_parcel_with_a_label_or_with_the_courier_is_not_cancelled_from_the_store(self):
+		order = self.order((self.item, 1, self.north))
+		shipment = self.booked(order, qty=1)
+		note = shipment.shipment_delivery_note[0].delivery_note
+		for values in ({"awb_number": "TRK1"}, {"awb_number": "", "tracking_status": "In Progress"}):
+			with self.subTest(**values):
+				shipment.db_set(values)
+				with self.assertRaises(frappe.ValidationError):
+					si.StarshipitFulfillment().cancel(frappe._dict(external_id=shipment.name))
+				self.assertEqual(frappe.db.get_value("Shipment", shipment.name, "docstatus"), 1)
+				self.assertEqual(frappe.db.get_value("Delivery Note", note, "docstatus"), 1)

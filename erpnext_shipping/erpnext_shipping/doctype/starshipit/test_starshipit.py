@@ -544,6 +544,56 @@ class TestStarshipit(IntegrationTestCase):
 		self.assertEqual(request.call_args.kwargs["json"], {"order_id": 789, "reprint": True})
 
 	@patch(REQUESTS)
+	def test_a_label_printed_again_after_no_answer_is_never_bought_twice(self, request):
+		import requests as http
+
+		from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import StarshipitNoAnswerError
+
+		frappe.db.set_single_value("Starshipit", "allow_label_printing", 1)
+		saved = {
+			"order_id": 456,
+			"status": "Saved",
+			"carrier": "PlainLabel",
+			"carrier_service_code": "Plain Label",
+		}
+		label = {
+			"labels": [base64.b64encode(b"%PDF-1.4").decode()],
+			"tracking_numbers": ["TRK1"],
+			"success": True,
+		}
+		shipment = self.shipment(shipment_id="456")
+		for status, expected in (
+			# Starshipit printed it before its answer was lost: the label is printed again for free
+			("Printed", {"order_id": 456, "reprint": True}),
+			# it never printed: the label is bought now, once
+			(
+				"Saved",
+				{
+					"order_id": 456,
+					"reprint": False,
+					"carrier": "PlainLabel",
+					"carrier_service_code": "Plain Label",
+				},
+			),
+		):
+			with self.subTest(status=status):
+				request.reset_mock()
+				request.side_effect = [response({"order": saved, "success": True}), http.Timeout()]
+				with self.assertRaises(StarshipitNoAnswerError):
+					StarshipitUtils().print_label(shipment)
+				request.side_effect = [
+					response({"order": dict(saved, status=status), "success": True}),
+					response(label),
+				]
+				labels, numbers = StarshipitUtils().print_label(shipment)
+				shipment_requests = [
+					c for c in request.call_args_list if c.args[:2] == ("POST", f"{API}/orders/shipment")
+				]
+				self.assertEqual(len(shipment_requests), 2)
+				self.assertEqual(shipment_requests[-1].kwargs["json"], expected)
+				self.assertEqual((labels, numbers), ([b"%PDF-1.4"], ["TRK1"]))
+
+	@patch(REQUESTS)
 	def test_manifest(self, request):
 		pdf = b"%PDF manifest"
 		request.side_effect = [
