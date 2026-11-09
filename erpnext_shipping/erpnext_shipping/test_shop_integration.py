@@ -287,6 +287,32 @@ class TestCheckoutRates(StoreTestCase):
 			options = si.checkout_rates(self.context())["options"]
 		self.assertEqual([o["meta"]["provider"] for o in options], ["Starshipit"])
 
+	@patch(
+		REQUEST,
+		return_value=response(
+			{
+				"services": [
+					*STARSHIPIT_RATES["services"],
+					{
+						"carrier": "PlainLabel",
+						"carrier_name": "Plain Label",
+						"service_name": "Plain Label - My Carrier",
+						"service_code": "Plain Label",
+						"total_price": 0.0,
+					},
+				],
+				"success": True,
+			}
+		),
+	)
+	def test_a_service_priced_at_nothing_is_offered_only_when_the_store_says_it_is_free(self, request):
+		self.offer("Starshipit")
+		options = si.checkout_rates(self.context())["options"]
+		self.assertEqual([o["service"] for o in options], ["Parcel Post"])
+		self.offer("Starshipit", checkout_free_services=1)
+		options = si.checkout_rates(self.context())["options"]
+		self.assertEqual([o["amount"] for o in options], [0.0, 9.5])
+
 	@patch(POST)
 	@patch(REQUEST, return_value=response(STARSHIPIT_RATES))
 	def test_one_provider_failing_leaves_the_others(self, request, post):

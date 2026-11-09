@@ -173,6 +173,10 @@ def checkout_options(provider: str, services: list[dict], currency: str | None) 
 		amount = amount_in(service, currency)
 		if amount is None:
 			continue
+		if amount <= 0 and not s.get("checkout_free_services"):
+			# a provider says 0 when it has no price, e.g. a plain label carrier whose custom rates
+			# don't cover the parcel
+			continue
 		service_id = cstr(service.get("service_id") or service.get("id"))
 		options.append(
 			{
