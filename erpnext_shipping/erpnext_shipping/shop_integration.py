@@ -177,6 +177,12 @@ def checkout_options(provider: str, services: list[dict], currency: str | None) 
 			# a provider says 0 when it has no price, e.g. a plain label carrier whose custom rates
 			# don't cover the parcel
 			continue
+		if amount > 0:
+			# what the courier's price leaves out and is invoiced later (fuel, rural delivery, fees)
+			amount = flt(
+				amount * (1 + flt(s.get("checkout_rate_percent")) / 100) + flt(s.get("checkout_rate_fixed")),
+				2,
+			)
 		service_id = cstr(service.get("service_id") or service.get("id"))
 		options.append(
 			{

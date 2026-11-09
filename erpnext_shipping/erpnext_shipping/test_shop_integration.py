@@ -313,6 +313,16 @@ class TestCheckoutRates(StoreTestCase):
 		options = si.checkout_rates(self.context())["options"]
 		self.assertEqual([o["amount"] for o in options], [0.0, 9.5])
 
+		# what the courier's price leaves out is added to a priced service: 10% and 2.00 per parcel
+		self.addCleanup(
+			frappe.db.set_single_value,
+			"Starshipit",
+			{"checkout_rate_percent": 0, "checkout_rate_fixed": 0, "checkout_free_services": 0},
+		)
+		self.offer("Starshipit", checkout_rate_percent=10, checkout_rate_fixed=2)
+		options = si.checkout_rates(self.context())["options"]
+		self.assertEqual([o["amount"] for o in options], [0.0, 12.45])
+
 	@patch(POST)
 	@patch(REQUEST, return_value=response(STARSHIPIT_RATES))
 	def test_one_provider_failing_leaves_the_others(self, request, post):

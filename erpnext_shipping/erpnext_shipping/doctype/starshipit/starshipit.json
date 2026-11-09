@@ -18,6 +18,8 @@
   "shop_checkout_rates",
   "rates_include_tax",
   "checkout_free_services",
+  "checkout_rate_percent",
+  "checkout_rate_fixed",
   "checkout_services",
   "column_break_store",
   "sender_address",
@@ -120,7 +122,7 @@
   },
   {
    "default": "0",
-   "description": "Tick if the rates Starshipit gives include tax (e.g. GST or VAT)",
+   "description": "Tick if the rates Starshipit gives include tax (e.g. GST), as set in Starshipit for each courier (for NZ Post Domestic: Settings > Couriers > NZ Post Domestic > Advanced). A rate for a parcel sent abroad carries no tax: the store charges it in full.",
    "fieldname": "rates_include_tax",
    "fieldtype": "Check",
    "label": "Rates Include Tax"
@@ -132,6 +134,20 @@
    "fieldname": "checkout_free_services",
    "fieldtype": "Check",
    "label": "Offer Services Priced at 0 as Free"
+  },
+  {
+   "depends_on": "shop_checkout_rates",
+   "description": "Added to every rate at checkout, for what the courier's quoted price leaves out (e.g. a fuel surcharge invoiced later).",
+   "fieldname": "checkout_rate_percent",
+   "fieldtype": "Percent",
+   "label": "Add to Checkout Rates (%)"
+  },
+  {
+   "depends_on": "shop_checkout_rates",
+   "description": "Added to every rate at checkout, per parcel, in the store's currency (e.g. a rural delivery add-on, or fees invoiced later).",
+   "fieldname": "checkout_rate_fixed",
+   "fieldtype": "Float",
+   "label": "Add to Checkout Rates (per parcel)"
   },
   {
    "description": "Service codes to offer, one per line. Empty offers every service",
@@ -167,7 +183,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-11-09 17:00:00.000000",
+ "modified": "2026-11-09 19:00:00.000000",
  "modified_by": "Administrator",
  "module": "ERPNext Shipping",
  "name": "Starshipit",
