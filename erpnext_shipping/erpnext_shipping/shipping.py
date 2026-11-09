@@ -37,20 +37,66 @@ def fetch_shipping_rates(
 ):
 	# Return Shipping Rates for the various Shipping Providers
 	frappe.has_permission("Shipment", "create", throw=True)
-	shipment_prices = get_shipping_rates(
-		frappe._dict(
-			pickup_from_type=pickup_from_type,
-			delivery_to_type=delivery_to_type,
-			pickup_address=get_address(pickup_address_name),
-			delivery_address=get_address(delivery_address_name),
-			parcels=json.loads(parcels),
-			description_of_content=description_of_content,
-			pickup_date=pickup_date,
-			value_of_goods=value_of_goods,
-			pickup_contact_name=pickup_contact_name,
-			delivery_contact_name=delivery_contact_name,
+	shipment_prices = []
+	letmeship_enabled = frappe.db.get_single_value("LetMeShip", "enabled")
+	sendcloud_enabled = frappe.db.get_single_value("SendCloud", "enabled")
+	starshipit_enabled = frappe.db.get_single_value("Starshipit", "enabled")
+	pickup_address = get_address(pickup_address_name)
+	delivery_address = get_address(delivery_address_name)
+	parcels = json.loads(parcels)
+
+	if letmeship_enabled:
+		pickup_contact = None
+		delivery_contact = None
+		if pickup_from_type != "Company":
+			pickup_contact = get_contact(pickup_contact_name)
+		else:
+			pickup_contact = get_company_contact(user=pickup_contact_name)
+			pickup_contact.email_id = pickup_contact.pop("email", None)
+
+		delivery_contact = get_contact(delivery_contact_name)
+
+		letmeship = get_letmeship_utils()
+		letmeship_prices = (
+			letmeship.get_available_services(
+				delivery_to_type=delivery_to_type,
+				pickup_address=pickup_address,
+				delivery_address=delivery_address,
+				parcels=parcels,
+				description_of_content=description_of_content,
+				pickup_date=pickup_date,
+				value_of_goods=value_of_goods,
+				pickup_contact=pickup_contact,
+				delivery_contact=delivery_contact,
+			)
+			or []
 		)
-	)
+		letmeship_prices = match_parcel_service_type_carrier(letmeship_prices, "carrier", "service_name")
+		shipment_prices += letmeship_prices
+
+	if sendcloud_enabled:
+		sendcloud = SendCloudUtils()
+		sendcloud_prices = (
+			sendcloud.get_available_services(
+				delivery_address=delivery_address, pickup_address=pickup_address, parcels=parcels
+			)
+			or []
+		)
+		sendcloud_prices = match_parcel_service_type_carrier(sendcloud_prices, "carrier", "service_name")
+		shipment_prices += sendcloud_prices
+
+	if starshipit_enabled:
+		starshipit_prices = StarshipitUtils().get_available_services(
+			pickup_address=pickup_address,
+			delivery_address=delivery_address,
+			parcels=parcels,
+			value_of_goods=value_of_goods,
+		)
+		starshipit_prices = match_parcel_service_type_carrier(starshipit_prices, "carrier", "service_name")
+		shipment_prices += starshipit_prices
+
+	shipment_prices = [item for item in shipment_prices if "total_price" in item]
+	shipment_prices = sorted(shipment_prices, key=lambda k: k["total_price"])
 	if shipment:
 		from erpnext_shipping.erpnext_shipping.shop_integration import mark_preferred
 
@@ -59,7 +105,8 @@ def fetch_shipping_rates(
 
 
 def get_shipping_rates(request: frappe._dict, providers: list[str] | None = None) -> list[dict]:
-	"""Services and prices from every enabled provider (or only those named), cheapest first.
+	"""Services and prices from every enabled provider (or only those named), cheapest first, for
+	store checkout (the Shipment form's Fetch Shipping Rates asks each provider itself).
 
 	request has pickup_address, delivery_address, parcels, value_of_goods, description_of_content,
 	pickup_date, delivery_to_type, and either pickup_from_type with pickup_contact_name and
