@@ -323,6 +323,48 @@ class TestCheckoutRates(StoreTestCase):
 		options = si.checkout_rates(self.context())["options"]
 		self.assertEqual([o["amount"] for o in options], [0.0, 12.45])
 
+	def test_a_couriers_breakdown_says_whether_its_price_includes_tax(self):
+		from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import breakdown_includes_tax
+
+		# as NZ Post (eShip) answers: domestic prices say they include GST; international say nothing
+		self.assertTrue(breakdown_includes_tax({"Total (incl) GST": "8.86", "Service Code": "CPOLTPA4"}))
+		self.assertIsNone(breakdown_includes_tax({"Service Code": "ICOU"}))
+		self.assertIsNone(breakdown_includes_tax(None))
+		# a carrier that lists the GST: none charged, nothing to take off
+		self.assertIsNone(
+			breakdown_includes_tax(
+				{"Calculated Price ex GST": "$14.80", "Calculated GST": "$0.00", "Calculated Price": "$14.80"}
+			)
+		)
+		self.assertTrue(
+			breakdown_includes_tax(
+				{"Calculated Price ex GST": "$14.80", "Calculated GST": "$1.48", "Calculated Price": "$16.28"}
+			)
+		)
+
+	@patch(
+		REQUEST,
+		return_value=response(
+			{
+				"services": [
+					dict(STARSHIPIT_RATES["services"][0], pricing_breakdown={"Total (incl) GST": "9.50"}),
+					{
+						"carrier": "MyNZPostBusiness",
+						"service_name": "Economy",
+						"service_code": "IECON",
+						"total_price": 36.79,
+						"pricing_breakdown": {"Service Code": "IECON"},
+					},
+				],
+				"success": True,
+			}
+		),
+	)
+	def test_the_courier_says_whether_a_rate_includes_tax_before_the_store_setting(self, request):
+		self.offer("Starshipit", rates_include_tax=0)
+		taxed = {o["service"]: o["tax_included"] for o in si.checkout_rates(self.context())["options"]}
+		self.assertEqual(taxed, {"Parcel Post": True, "Economy": False})
+
 	@patch(POST)
 	@patch(REQUEST, return_value=response(STARSHIPIT_RATES))
 	def test_one_provider_failing_leaves_the_others(self, request, post):

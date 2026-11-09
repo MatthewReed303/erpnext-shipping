@@ -246,6 +246,7 @@ class StarshipitUtils:
 				[cstr(service.get("carrier")), cstr(service.get("service_code"))]
 			),
 			total_price=service.get("total_price"),
+			tax_included=breakdown_includes_tax(service.get("pricing_breakdown")),
 		)
 
 	def packages(self, parcels: list[dict]) -> list[dict]:
@@ -620,6 +621,22 @@ def shipment_currency(shipment_doc) -> str | None:
 		or frappe.db.get_single_value("Global Defaults", "default_company")
 	)
 	return frappe.get_cached_value("Company", company, "default_currency") if company else None
+
+
+def breakdown_includes_tax(breakdown) -> bool | None:
+	"""Whether a service's price includes tax, when its courier says so in the price breakdown
+	(e.g. NZ Post's "Total (incl) GST", or a GST amount); None when it doesn't say."""
+	if not isinstance(breakdown, dict):
+		return None
+	for key, value in breakdown.items():
+		name = cstr(key).lower()
+		if "incl" in name and any(word in name for word in ("gst", "tax", "vat")):
+			return True
+		if name.replace("calculated", "").strip() in ("gst", "tax", "vat"):
+			amount = flt(cstr(value).replace("$", "").replace(",", "").strip() or 0)
+			if amount:
+				return True
+	return None
 
 
 def rate_address(address) -> dict:

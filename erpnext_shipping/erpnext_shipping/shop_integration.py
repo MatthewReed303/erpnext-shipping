@@ -189,7 +189,10 @@ def checkout_options(provider: str, services: list[dict], currency: str | None) 
 				"id": f"{frappe.scrub(provider)}:{service_id}",
 				"label": service_label(service),
 				"amount": amount,
-				"tax_included": bool(s.get("rates_include_tax")),
+				# the courier says whether its price includes tax; else the store's setting
+				"tax_included": service["tax_included"]
+				if service.get("tax_included") is not None
+				else bool(s.get("rates_include_tax")),
 				"carrier": service.get("carrier"),
 				"service": service.get("service_name"),
 				"meta": {
