@@ -450,6 +450,26 @@ class TestCheckoutRates(StoreTestCase):
 			)
 		self.assertIsNone(post.call_args.kwargs["timeout"])
 
+	def test_pickups_are_on_the_next_working_day_of_the_companys_holiday_list(self):
+		saturday = "2026-11-14"
+		with patch("frappe.get_cached_value", return_value=None):
+			self.assertEqual(si.next_business_day("2026-11-13", self.company), "2026-11-16")
+		holidays = frappe.get_doc(
+			{
+				"doctype": "Holiday List",
+				"holiday_list_name": "_Test Store Holidays",
+				"from_date": "2026-01-01",
+				"to_date": "2026-12-31",
+				"holidays": [{"holiday_date": "2026-11-16", "description": "Closed"}],
+			}
+		)
+		if not frappe.db.exists("Holiday List", holidays.holiday_list_name):
+			holidays.insert(ignore_permissions=True)
+		with patch("frappe.get_cached_value", return_value=holidays.holiday_list_name):
+			# the list's days off, not the weekend, decide
+			self.assertEqual(si.next_business_day("2026-11-13", self.company), saturday)
+			self.assertEqual(si.next_business_day("2026-11-15", self.company), "2026-11-17")
+
 	@patch(REQUEST, return_value=response({"success": False, "errors": [{"message": "Down"}]}, 503))
 	def test_no_rates_at_all_says_so(self, request):
 		self.offer("Starshipit")

@@ -109,6 +109,10 @@ class TestStarshipitHelpers(UnitTestCase):
 		self.assertEqual(erpnext_tracking_status(""), "")
 		self.assertEqual(erpnext_tracking_status("Saved"), "")  # no label yet
 		self.assertEqual(erpnext_tracking_status("Unshipped"), "")
+		self.assertEqual(erpnext_tracking_status("ReturnedToSender"), "Returned")
+		self.assertEqual(erpnext_tracking_status("ReturnLabel"), "Returned")
+		self.assertEqual(erpnext_tracking_status("Lost"), "Lost")
+		self.assertEqual(erpnext_tracking_status("Exception"), "In Progress")
 
 	def test_status_from_order_and_tracking(self):
 		printed = status_dict({"status": "Printed", "packages": [{"tracking_number": None}]})
@@ -1209,6 +1213,8 @@ class TestStarshipitStore(IntegrationTestCase):
 			("In Progress", "Manifested", "Shipped"),
 			("In Progress", "In Transit: Picked up", "Shipped"),
 			("Delivered", "Delivered", "Delivered"),
+			("Returned", "Returned To Sender", "Failed"),
+			("Lost", "Lost", "Failed"),
 		):
 			shipment.update(tracking_status=tracking_status, tracking_status_info=info)
 			with (

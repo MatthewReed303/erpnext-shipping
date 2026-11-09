@@ -55,6 +55,15 @@ UNPRINTED_STATUSES = ("", "unshipped", "saved", "new")
 # ERPNext's Shipment tracking_status only offers In Progress / Delivered / Returned / Lost,
 # so Starshipit's detailed status goes to tracking_status_info.
 DELIVERED_STATUSES = {"delivered"}
+RETURNED_STATUSES = {
+	"returned",
+	"returnedtosender",
+	"returntosender",
+	"returnlabel",
+	"returnpickupprinted",
+	"returndropoffprinted",
+}
+LOST_STATUSES = {"lost"}
 # a cancelled shipment is not on its way, so it gets no tracking_status (the detail stays in tracking_status_info)
 NOT_IN_TRANSIT_STATUSES = UNPRINTED_STATUSES + ("cancelled",)
 
@@ -817,9 +826,16 @@ def normalize_status(status: str | None) -> str:
 
 def erpnext_tracking_status(status: str | None) -> str:
 	"""Map a Starshipit status to the Shipment's tracking_status options."""
-	if cstr(status).replace(" ", "").lower() in NOT_IN_TRANSIT_STATUSES:
+	key = cstr(status).replace(" ", "").lower()
+	if key in NOT_IN_TRANSIT_STATUSES:
 		return ""  # no label yet, or cancelled: nothing is in transit
-	return "Delivered" if cstr(status).replace(" ", "").lower() in DELIVERED_STATUSES else "In Progress"
+	if key in DELIVERED_STATUSES:
+		return "Delivered"
+	if key in RETURNED_STATUSES:
+		return "Returned"
+	if key in LOST_STATUSES:
+		return "Lost"
+	return "In Progress"
 
 
 def tracking_numbers(*values) -> list[str]:

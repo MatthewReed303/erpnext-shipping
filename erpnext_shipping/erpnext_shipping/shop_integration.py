@@ -119,7 +119,10 @@ def checkout_rates(context) -> dict | None:
 		parcels=parcels,
 		value_of_goods=flt(context.subtotal),
 		description_of_content=content_description(),
-		pickup_date=next_business_day(),
+		pickup_date=next_business_day(
+			company=context.get("warehouse")
+			and frappe.db.get_value("Warehouse", context.warehouse, "company")
+		),
 		pickup_contact=contact,
 		delivery_contact=contact,
 		checkout=True,
@@ -424,6 +427,8 @@ class ShippingFulfillment(FulfillmentProvider):
 		info = (shipment.tracking_status_info or "").split(":")[0].strip().lower()
 		if shipment.tracking_status == "Delivered":
 			result["status"] = "Delivered"
+		elif shipment.tracking_status in ("Returned", "Lost"):
+			result["status"] = "Failed"
 		elif shipment.tracking_status == "In Progress" and info not in NOT_YET_SHIPPED:
 			# manifested, or the courier has scanned it
 			result["status"] = "Shipped"
@@ -595,7 +600,7 @@ def create_shipment_for_order(
 	shipment.pickup_address_name = origin_name(parcel.ship_from, parcel.warehouse, fulfillment_provider)
 	shipment.pickup_contact_person = pickup_user
 	set_pickup_contact(shipment, pickup_user)
-	shipment.pickup_date = next_business_day()
+	shipment.pickup_date = next_business_day(company=shipment.pickup_company)
 	shipment.description_of_content = content_description()
 	shipment.parcel_template = None
 	shipment.flags.fill_parcels_from_items = True
@@ -757,9 +762,17 @@ def chosen_service(option) -> dict | None:
 	return choice
 
 
-def next_business_day(start: str | None = None) -> str:
+def next_business_day(start: str | None = None, company: str | None = None) -> str:
+	"""The next day after start that isn't a holiday in the company's default Holiday List, or with
+	no Holiday List, the next weekday."""
+	from erpnext.setup.doctype.holiday_list.holiday_list import is_holiday
+
+	company = company or frappe.db.get_single_value("Shop Settings", "company")
+	holidays = frappe.get_cached_value("Company", company, "default_holiday_list") if company else None
 	day = getdate(add_days(start or nowdate(), 1))
-	while day.weekday() >= 5:
+	for _attempt in range(366):
+		if not (is_holiday(holidays, day) if holidays else day.weekday() >= 5):
+			break
 		day = getdate(add_days(day, 1))
 	return str(day)
 
