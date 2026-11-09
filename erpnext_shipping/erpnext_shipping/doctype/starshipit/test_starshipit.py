@@ -988,7 +988,7 @@ class TestStarshipitStore(IntegrationTestCase):
 			).insert(ignore_permissions=True)
 		return name
 
-	def weighed_item(self, code: str, kg: float, domestic_only: int = 0) -> str:
+	def weighed_item(self, code: str, kg: float) -> str:
 		if not frappe.db.exists("Item", code):
 			frappe.get_doc(
 				{
@@ -1002,7 +1002,6 @@ class TestStarshipitStore(IntegrationTestCase):
 					"weight_uom": "Kg",
 				}
 			).insert(ignore_permissions=True)
-		frappe.db.set_value("Item", code, "ships_domestic_only", domestic_only)
 		return code
 
 	def context(self, country="New Zealand", code="nz", items=None):
@@ -1103,15 +1102,6 @@ class TestStarshipitStore(IntegrationTestCase):
 		)
 		options = self.si.checkout_rates(self.context())["options"]
 		self.assertEqual([o["meta"]["service_code"] for o in options], ["CPOLE"])
-
-	@patch(REQUESTS)
-	def test_domestic_only_items_do_not_go_overseas(self, request):
-		battery = self.weighed_item("_Test Starshipit Battery", 0.3, domestic_only=1)
-		items = [{"item_code": battery, "qty": 1, "rate": 50}]
-		result = self.si.checkout_rates(self.context("Australia", "au", items))
-		self.assertEqual(result["options"], [])
-		self.assertIn("_Test Starshipit Battery", result["messages"][0])
-		request.assert_not_called()
 
 	def test_a_late_event_does_not_move_a_delivered_parcel_back(self):
 		from erpnext_shipping.erpnext_shipping.doctype.starshipit import starshipit
@@ -1308,6 +1298,6 @@ class TestInstall(IntegrationTestCase):
 	def test_variants_get_the_items_shipping_fields(self):
 		from erpnext_shipping.install import copy_to_variants
 
-		copy_to_variants(("shipping_parcel_template", "ships_in_own_box", "ships_domestic_only"))
+		copy_to_variants(("shipping_parcel_template", "ships_in_own_box"))
 		copied = {row.field_name for row in frappe.get_single("Item Variant Settings").fields}
-		self.assertTrue({"shipping_parcel_template", "ships_in_own_box", "ships_domestic_only"} <= copied)
+		self.assertTrue({"shipping_parcel_template", "ships_in_own_box"} <= copied)

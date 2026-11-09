@@ -34,7 +34,7 @@ STARSHIPIT_RATES = {
 	"services": [
 		{
 			"carrier": "CourierPost",
-			"carrier_name": "NZ Post Domestic",
+			"carrier_name": "Post Domestic",
 			"service_name": "Parcel Post",
 			"service_code": "CPOLP",
 			"total_price": 9.5,
@@ -161,7 +161,7 @@ class StoreTestCase(IntegrationTestCase):
 			).insert(ignore_permissions=True)
 		return name
 
-	def weighed_item(self, code: str, kg: float, domestic_only: int = 0) -> str:
+	def weighed_item(self, code: str, kg: float) -> str:
 		if not frappe.db.exists("Item", code):
 			frappe.get_doc(
 				{
@@ -175,9 +175,7 @@ class StoreTestCase(IntegrationTestCase):
 					"weight_uom": "Kg",
 				}
 			).insert(ignore_permissions=True)
-		frappe.db.set_value(
-			"Item", code, {"ships_domestic_only": domestic_only, "shipping_parcel_template": self.box}
-		)
+		frappe.db.set_value("Item", code, {"shipping_parcel_template": self.box})
 		return code
 
 	def user(self, email: str, phone: str) -> str:
@@ -514,22 +512,6 @@ class TestCheckoutRates(StoreTestCase):
 			# a parcel sent with Starshipit keeps Starshipit's Ship From Address
 			self.assertEqual(si.StarshipitFulfillment().default_ship_from(), self.sender)
 			self.assertEqual(si.origin_name("LOCATION-ADDR"), "LOCATION-ADDR")
-
-	@patch(REQUEST, return_value=response(STARSHIPIT_RATES))
-	def test_domestic_only_items_compare_with_the_parcels_origin(self, request):
-		self.offer("Starshipit")
-		other = frappe.db.get_value("Country", {"name": ["!=", self.country], "code": ["is", "set"]}, "name")
-		overseas = self.address("_Test Store Overseas", "3 Far Road", "2000", country=other)
-		battery = self.weighed_item("_Test Store Battery", 0.3, domestic_only=1)
-		items = [{"item_code": battery, "qty": 1, "rate": 50}]
-		# sent from overseas to here: the item would leave the origin's country
-		result = si.checkout_rates(self.context(items=items, ship_from=overseas))
-		self.assertEqual(result["options"], [])
-		self.assertIn(other, result["messages"][0])
-		request.assert_not_called()
-		# sent within the origin's country
-		result = si.checkout_rates(self.context(items=items))
-		self.assertTrue(result["options"])
 
 
 class TestStoreFulfillment(StoreTestCase):

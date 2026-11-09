@@ -76,7 +76,7 @@ def checkout_rates(context) -> dict | None:
 	providers = checkout_providers(context.get("location_provider"))
 	if not providers:
 		return None
-	lines, restricted = cart_lines(context.cart_items)
+	lines = cart_lines(context.cart_items)
 	if not lines:
 		return None  # nothing in the parcel is sent
 	try:
@@ -92,15 +92,6 @@ def checkout_rates(context) -> dict | None:
 	if not origin:
 		return None  # nowhere to send from
 	address = context.address
-	if address.country and address.country != origin.country and restricted:
-		return {
-			"options": [],
-			"messages": [
-				_("{0} can only be sent within {1}. Remove it to ship overseas, or contact us.").format(
-					", ".join(restricted), origin.country
-				)
-			],
-		}
 	try:
 		parcels = parcels_for_items(lines, None, settings().get("default_parcel_template"))
 	except frappe.ValidationError:
@@ -300,20 +291,18 @@ def content_description() -> str:
 	return settings().get("content_description") or _("Goods")
 
 
-def cart_lines(items: list[dict]) -> tuple[list[dict], list[str]]:
-	"""Item lines for parcels_for_items, and the names of items that can't leave the country."""
-	lines, restricted = [], []
+def cart_lines(items: list[dict]) -> list[dict]:
+	"""Item lines for parcels_for_items."""
+	lines = []
 	meta = frappe.get_meta("Item")
 	fields = ["item_name", "weight_per_unit", "weight_uom", "is_stock_item"]
-	for field in ("shipping_parcel_template", "ships_in_own_box", "ships_domestic_only"):
+	for field in ("shipping_parcel_template", "ships_in_own_box"):
 		if meta.has_field(field):
 			fields.append(field)
 	for row in items:
 		item = frappe.db.get_value("Item", row["item_code"], fields, as_dict=True)
 		if not item:
 			continue
-		if item.get("ships_domestic_only"):
-			restricted.append(item.item_name)
 		if not item.is_stock_item and not item.weight_per_unit:
 			continue  # a service, not something in the parcel
 		lines.append(
@@ -325,7 +314,7 @@ def cart_lines(items: list[dict]) -> tuple[list[dict], list[str]]:
 				own_box=cint(item.get("ships_in_own_box")),
 			)
 		)
-	return lines, restricted
+	return lines
 
 
 def cache_key(provider: str, origin, destination, parcels) -> str:

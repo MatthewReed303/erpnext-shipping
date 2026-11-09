@@ -11,7 +11,7 @@ def after_install():
 	make_property_setters(get_property_setters())
 	# Float columns are sized by precision, so apply the parcel weight precision to the column too
 	frappe.db.updatedb("Shipment Parcel")
-	copy_to_variants(("shipping_parcel_template", "ships_in_own_box", "ships_domestic_only"))
+	copy_to_variants(("shipping_parcel_template", "ships_in_own_box"))
 
 
 def copy_to_variants(fieldnames) -> None:
