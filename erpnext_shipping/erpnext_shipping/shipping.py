@@ -148,6 +148,7 @@ def letmeship_rates(request: frappe._dict) -> list[dict]:
 		value_of_goods=request.value_of_goods,
 		pickup_contact=frappe._dict(pickup_contact),
 		delivery_contact=frappe._dict(delivery_contact),
+		checkout=bool(request.checkout),
 	)
 
 
@@ -156,6 +157,7 @@ def sendcloud_rates(request: frappe._dict) -> list[dict]:
 		delivery_address=request.delivery_address,
 		pickup_address=request.pickup_address,
 		parcels=request.parcels,
+		checkout=bool(request.checkout),
 	)
 
 

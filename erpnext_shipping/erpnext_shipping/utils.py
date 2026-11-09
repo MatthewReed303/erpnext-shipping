@@ -7,6 +7,9 @@ from frappe import _
 from frappe.utils import ceil, flt
 from frappe.utils.data import get_link_to_form
 
+# seconds a provider has to quote at store checkout, while the shopper waits
+CHECKOUT_TIMEOUT = 8
+
 
 def get_tracking_url(carrier, tracking_number):
 	# Return the formatted Tracking URL.

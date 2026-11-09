@@ -36,12 +36,11 @@ from frappe.model.document import Document
 from frappe.utils import cint, cstr, flt, get_time, get_url, getdate
 from frappe.utils.data import get_link_to_form
 
-from erpnext_shipping.erpnext_shipping.utils import show_error_alert
+from erpnext_shipping.erpnext_shipping.utils import CHECKOUT_TIMEOUT, show_error_alert
 
 STARSHIPIT_PROVIDER = "Starshipit"
 BASE_URL = "https://api.starshipit.com/api"
 TIMEOUT = 30
-CHECKOUT_TIMEOUT = 8
 MIN_REQUEST_INTERVAL = 0.55  # developer API access allows two requests per second
 PACING_KEY = "starshipit:last_request_at"
 WEIGHT_DECIMALS = 3

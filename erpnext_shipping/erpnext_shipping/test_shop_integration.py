@@ -13,6 +13,7 @@ from frappe.utils import add_days, nowdate
 from frappe.utils.password import set_encrypted_password
 
 from erpnext_shipping.erpnext_shipping import shop_integration as si
+from erpnext_shipping.erpnext_shipping.utils import CHECKOUT_TIMEOUT
 
 REQUEST = "requests.request"
 POST = "requests.post"
@@ -376,6 +377,42 @@ class TestCheckoutRates(StoreTestCase):
 		si.checkout_rates(self.context())
 		self.assertEqual(request.call_count, 1)  # Starshipit's answer was cached
 		self.assertEqual(post.call_count, 2)  # SendCloud's failure wasn't
+
+	@patch(POST)
+	@patch(REQUEST)
+	def test_a_provider_that_does_not_answer_at_checkout_is_asked_again(self, request, post):
+		import requests
+
+		def letmeship_times_out(method, url, **kwargs):
+			if "letmeship" in url:
+				raise requests.Timeout()
+			return response(STARSHIPIT_RATES)
+
+		request.side_effect = letmeship_times_out
+		post.side_effect = requests.Timeout()
+		self.offer(*PROVIDERS)
+		result = si.checkout_rates(self.context(location_provider="erpnext_shipping"))
+		self.assertEqual([o["id"] for o in result["options"]], ["starshipit:CourierPost|CPOLP"])
+		# each call is cut short for the shopper, and no failure is kept as "no services"
+		letmeship = next(c for c in request.call_args_list if "letmeship" in c.args[1])
+		self.assertEqual(letmeship.kwargs["timeout"], CHECKOUT_TIMEOUT)
+		self.assertEqual(post.call_args.kwargs["timeout"], CHECKOUT_TIMEOUT)
+		si.checkout_rates(self.context(location_provider="erpnext_shipping"))
+		self.assertEqual(post.call_count, 2)
+		self.assertEqual(sum("letmeship" in c.args[1] for c in request.call_args_list), 2)
+
+	@patch(POST, return_value=response({"data": []}))
+	def test_desk_rates_keep_their_alerts_and_no_timeout(self, post):
+		from erpnext_shipping.erpnext_shipping.doctype.sendcloud.sendcloud import SendCloudUtils
+
+		self.offer("SendCloud")
+		with self.assertRaises(frappe.ValidationError):
+			SendCloudUtils().get_available_services(
+				frappe._dict(country_code="nz", pincode="9016", city="Dunedin", address_line1="1 St"),
+				frappe._dict(country_code="nz", pincode="1010", city="Auckland", address_line1="2 St"),
+				[{"weight": 1}],
+			)
+		self.assertIsNone(post.call_args.kwargs["timeout"])
 
 	@patch(REQUEST, return_value=response({"success": False, "errors": [{"message": "Down"}]}, 503))
 	def test_no_rates_at_all_says_so(self, request):
