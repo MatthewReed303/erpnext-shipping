@@ -37,6 +37,35 @@ def fetch_shipping_rates(
 ):
 	# Return Shipping Rates for the various Shipping Providers
 	frappe.has_permission("Shipment", "create", throw=True)
+	return shipping_rates(
+		pickup_from_type,
+		delivery_to_type,
+		pickup_address_name,
+		delivery_address_name,
+		parcels,
+		description_of_content,
+		pickup_date,
+		value_of_goods,
+		pickup_contact_name,
+		delivery_contact_name,
+		shipment,
+	)
+
+
+def shipping_rates(
+	pickup_from_type,
+	delivery_to_type,
+	pickup_address_name,
+	delivery_address_name,
+	parcels,
+	description_of_content,
+	pickup_date,
+	value_of_goods,
+	pickup_contact_name=None,
+	delivery_contact_name=None,
+	shipment=None,
+):
+	"""Every enabled provider's services and prices for a Shipment's details, cheapest first."""
 	shipment_prices = []
 	letmeship_enabled = frappe.db.get_single_value("LetMeShip", "enabled")
 	sendcloud_enabled = frappe.db.get_single_value("SendCloud", "enabled")
@@ -198,6 +227,39 @@ def create_shipment(
 	delivery_notes=None,
 ):
 	frappe.get_doc("Shipment", shipment).check_permission("write")
+	return book_shipment(
+		shipment,
+		pickup_from_type,
+		delivery_to_type,
+		pickup_address_name,
+		delivery_address_name,
+		shipment_parcel,
+		description_of_content,
+		pickup_date,
+		value_of_goods,
+		service_data,
+		pickup_contact_name=pickup_contact_name,
+		delivery_contact_name=delivery_contact_name,
+		delivery_notes=delivery_notes,
+	)
+
+
+def book_shipment(
+	shipment,
+	pickup_from_type,
+	delivery_to_type,
+	pickup_address_name,
+	delivery_address_name,
+	shipment_parcel,
+	description_of_content,
+	pickup_date,
+	value_of_goods,
+	service_data,
+	pickup_contact_name=None,
+	delivery_contact_name=None,
+	delivery_notes=None,
+):
+	"""Book the Shipment with the provider and service in service_data."""
 	if isinstance(delivery_notes, str):
 		delivery_notes = json.loads(delivery_notes)
 
@@ -293,6 +355,13 @@ def get_delivery_company_name(shipment: str) -> str | None:
 def print_shipping_label(shipment: str):
 	shipment_doc = frappe.get_doc("Shipment", shipment)
 	shipment_doc.check_permission("write")  # printing a label is charged by the courier
+	return shipping_label(shipment_doc)
+
+
+def shipping_label(shipment_doc):
+	"""Buy (or print again) the booked Shipment's label: the attached label files' URLs, or the
+	label's bytes for LetMeShip."""
+	shipment = shipment_doc.name
 	service_provider = shipment_doc.service_provider
 	shipment_id = shipment_doc.shipment_id
 

@@ -10,7 +10,8 @@ Both are registered in hooks.py and only run when the Shop app calls them:
 - shop_fulfillment_providers["erpnext_shipping"]: when a paid order's parcel is sent for
   fulfilment, its items are delivered from its warehouse (Delivery Note) and a draft Shipment is
   made from its Ship From Address, with the service the customer chose shown first in Fetch
-  Shipping Rates. You check the parcels, submit, and book it with the provider as usual.
+  Shipping Rates. You check the parcels, submit, and book it with the provider as usual, or book
+  it and print its label from the Shop admin's order page.
   "starshipit" does the same with Starshipit rates only, for stores and records set up with it.
 """
 
@@ -460,6 +461,95 @@ class ShippingFulfillment(FulfillmentProvider):
 					return_note(note)
 		return {"status": "Cancelled"}
 
+	def courier(self, fulfillment) -> dict | None:
+		"""Where the parcel's courier booking and label stand."""
+		doc = parcel_shipment(fulfillment)
+		if not doc or doc.docstatus == 2:
+			return None
+		return {
+			"booked": bool(doc.shipment_id),
+			"provider": doc.service_provider if doc.shipment_id else None,
+			"service": doc.carrier_service if doc.shipment_id else None,
+			"amount": flt(doc.shipment_amount) if doc.shipment_id else None,
+			"currency": shipment_currency(doc),
+			"labels": len(label_files(doc.name)),
+			"can_book": not doc.shipment_id,
+			"can_print_label": bool(doc.shipment_id),
+		}
+
+	def courier_services(self, fulfillment) -> list[dict]:
+		"""The services the parcel can be booked with and their prices, cheapest first."""
+		doc = unbooked_shipment(fulfillment)
+		return [
+			{
+				"id": service_key(service),
+				"provider": service.get("service_provider"),
+				"carrier": service.get("carrier"),
+				"service": service.get("service_name"),
+				"amount": flt(service.get("total_price")),
+				"currency": service.get("currency") or shipment_currency(doc),
+				"preferred": bool(service.get("is_preferred")),
+			}
+			for service in self.services_for(doc)
+		]
+
+	def book_courier(self, fulfillment, service_id: str) -> dict:
+		"""Submit the parcel's Shipment if it is a draft, and book it with the service chosen, at the
+		provider's current price."""
+		from erpnext_shipping.erpnext_shipping.shipping import book_shipment
+
+		doc = unbooked_shipment(fulfillment)
+		if not doc.delivery_contact_name:
+			frappe.throw(
+				_("Shipment {0} has no delivery contact. Add the customer's contact to it in Desk.").format(
+					frappe.bold(doc.name)
+				)
+			)
+		service = next((s for s in self.services_for(doc) if service_key(s) == service_id), None)
+		if not service:
+			frappe.throw(_("That service isn't offered for this parcel any more. Choose another."))
+		if doc.docstatus == 0:
+			doc.flags.ignore_permissions = True
+			doc.submit()
+		book_shipment(
+			doc.name,
+			**shipment_details(doc),
+			shipment_parcel=parcels_json(doc),
+			service_data=json.dumps(service, default=str),
+			delivery_notes=[row.delivery_note for row in doc.shipment_delivery_note],
+		)
+		return self.fetch_status(fulfillment)
+
+	def print_label(self, fulfillment) -> dict:
+		"""The parcel's label files, bought from the provider the first time; the parcel's status with
+		any tracking number the label brought."""
+		from erpnext_shipping.erpnext_shipping.shipping import save_label_as_attachment, shipping_label
+
+		doc = parcel_shipment(fulfillment)
+		if not doc or doc.docstatus != 1 or not doc.shipment_id:
+			frappe.throw(_("Book a courier for this parcel first."))
+		files = label_files(doc.name)
+		if not files:
+			label = shipping_label(doc)
+			if isinstance(label, str):
+				# LetMeShip answers with the label's bytes
+				label = [save_label_as_attachment(doc.name, bytes(json.loads(label)))]
+			files = label_files(doc.name) or list(label or [])
+		return {**self.fetch_status(fulfillment), "files": files}
+
+	def labels(self, fulfillment) -> list[str]:
+		"""The labels printed for the parcel so far."""
+		doc = parcel_shipment(fulfillment)
+		return label_files(doc.name) if doc else []
+
+	def services_for(self, doc) -> list[dict]:
+		from erpnext_shipping.erpnext_shipping.shipping import shipping_rates
+
+		services = shipping_rates(**shipment_details(doc), parcels=parcels_json(doc), shipment=doc.name)
+		if self.shipping_providers:
+			services = [s for s in services if s.get("service_provider") in self.shipping_providers]
+		return services
+
 
 class StarshipitFulfillment(ShippingFulfillment):
 	"""The same with Starshipit rates only, for stores and fulfilments set up with it."""
@@ -537,6 +627,73 @@ def parcel_of(fulfillment, items: list[dict] | None) -> frappe._dict:
 		ship_from=fulfillment.get("ship_from_address"),
 		shipping_option=fulfillment.get("shipping_option"),
 		shipment=fulfillment.get("external_id"),
+	)
+
+
+def parcel_shipment(fulfillment):
+	"""The Shipment a store parcel was handed to, if it is still there."""
+	name = fulfillment.external_id
+	return frappe.get_doc("Shipment", name) if name and frappe.db.exists("Shipment", name) else None
+
+
+def unbooked_shipment(fulfillment):
+	doc = parcel_shipment(fulfillment)
+	if not doc or doc.docstatus == 2:
+		frappe.throw(_("This parcel has no Shipment to book. Send it to fulfilment again."))
+	if doc.shipment_id:
+		frappe.throw(
+			_("Shipment {0} is already booked with {1}.").format(frappe.bold(doc.name), doc.service_provider)
+		)
+	return doc
+
+
+def shipment_details(doc) -> dict:
+	"""A Shipment's details as rates and booking take them, as the Shipment form sends them."""
+	return {
+		"pickup_from_type": doc.pickup_from_type,
+		"delivery_to_type": doc.delivery_to_type,
+		"pickup_address_name": doc.pickup_address_name,
+		"delivery_address_name": doc.delivery_address_name,
+		"description_of_content": doc.description_of_content,
+		"pickup_date": doc.pickup_date,
+		"value_of_goods": doc.value_of_goods,
+		"pickup_contact_name": doc.pickup_contact_person
+		if doc.pickup_from_type == "Company"
+		else doc.pickup_contact_name,
+		"delivery_contact_name": doc.delivery_contact_name,
+	}
+
+
+def shipment_currency(doc) -> str | None:
+	"""What the Shipment's prices are in: its company's currency."""
+	company = doc.get("pickup_company") or doc.get("delivery_company")
+	if company:
+		return frappe.get_cached_value("Company", company, "default_currency")
+	return frappe.db.get_default("currency")
+
+
+def parcels_json(doc) -> str:
+	return json.dumps([row.as_dict() for row in doc.shipment_parcel], default=str)
+
+
+def service_key(service: dict) -> str:
+	"""A service told apart from the others offered: its provider, carrier and service."""
+	return "|".join(
+		cstr(service.get(key)) for key in ("service_provider", "carrier", "service_id", "service_name")
+	)
+
+
+def label_files(shipment: str) -> list[str]:
+	"""The label PDFs attached to a Shipment, in order."""
+	return frappe.get_all(
+		"File",
+		filters={
+			"attached_to_doctype": "Shipment",
+			"attached_to_name": shipment,
+			"file_name": ["like", "label%"],
+		},
+		pluck="file_url",
+		order_by="file_name",
 	)
 
 

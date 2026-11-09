@@ -801,3 +801,82 @@ class TestStoreFulfillment(StoreTestCase):
 					si.StarshipitFulfillment().cancel(frappe._dict(external_id=shipment.name))
 				self.assertEqual(frappe.db.get_value("Shipment", shipment.name, "docstatus"), 1)
 				self.assertEqual(frappe.db.get_value("Delivery Note", note, "docstatus"), 1)
+
+	@patch(REQUEST)
+	def test_staff_book_a_parcel_and_print_its_label_from_the_store(self, request):
+		import base64
+		from io import BytesIO
+
+		from pypdf import PdfWriter
+
+		frappe.db.set_single_value("Starshipit", {"enabled": 1, "allow_label_printing": 1})
+		pdf = PdfWriter()
+		pdf.add_blank_page(288, 432)
+		content = BytesIO()
+		pdf.write(content)
+		label = base64.b64encode(content.getvalue()).decode()
+		printed = []
+
+		def starshipit(method, url, **kwargs):
+			path = url.rsplit("/api", 1)[1]
+			if path == "/deliveryservices":
+				return response(STARSHIPIT_RATES)
+			if path == "/orders/search":
+				return response({"orders": [], "success": True})
+			if (method, path) == ("POST", "/orders"):
+				return response({"order": {"order_id": 555}, "success": True})
+			if (method, path) == ("POST", "/orders/shipment"):
+				printed.append(kwargs["json"])
+				return response({"labels": [label], "tracking_numbers": ["TRK9"], "success": True})
+			if (method, path) == ("GET", "/orders"):
+				status = "Printed" if printed else "Saved"
+				return response({"order": {"order_id": 555, "status": status}, "success": True})
+			return response({"success": True})
+
+		request.side_effect = starshipit
+		order = self.order((self.item, 1, self.north))
+		items, fulfillment = self.parcel(self.north, self.item, 1, self.north_address, self.option())
+		provider = si.StarshipitFulfillment()
+		fulfillment.external_id = provider.create_shipment(order, items, fulfillment)["external_id"]
+		courier = provider.courier(fulfillment)
+		self.assertEqual((courier["booked"], courier["can_book"], courier["labels"]), (False, True, 0))
+		with self.assertRaises(frappe.ValidationError):
+			provider.print_label(fulfillment)
+
+		services = provider.courier_services(fulfillment)
+		self.assertEqual([(s["service"], s["amount"]) for s in services], [("Parcel Post", 9.5)])
+		with self.assertRaises(frappe.ValidationError):
+			provider.book_courier(fulfillment, services[0]["id"])  # no one to deliver to yet
+		contact = frappe.get_doc(
+			{
+				"doctype": "Contact",
+				"first_name": "Store",
+				"last_name": "Shopper",
+				"email_ids": [{"email_id": "store.shopper@example.com", "is_primary": 1}],
+				"phone_nos": [{"phone": "+1 555 0102", "is_primary_phone": 1}],
+				"links": [{"link_doctype": "Customer", "link_name": self.customer}],
+			}
+		).insert(ignore_permissions=True)
+		frappe.db.set_value("Shipment", fulfillment.external_id, "delivery_contact_name", contact.name)
+		with self.assertRaises(frappe.ValidationError):
+			provider.book_courier(fulfillment, "Starshipit|Someone|else|entirely")
+		self.assertEqual(frappe.db.get_value("Shipment", fulfillment.external_id, "docstatus"), 0)
+
+		result = provider.book_courier(fulfillment, services[0]["id"])
+		shipment = frappe.get_doc("Shipment", fulfillment.external_id)
+		self.assertEqual((shipment.docstatus, shipment.shipment_id, shipment.status), (1, "555", "Booked"))
+		self.assertEqual(result["status"], "Accepted")
+		courier = provider.courier(fulfillment)
+		self.assertEqual(
+			(courier["booked"], courier["can_book"], courier["service"]), (True, False, "Parcel Post")
+		)
+		with self.assertRaises(frappe.ValidationError):
+			provider.book_courier(fulfillment, services[0]["id"])
+
+		label_result = provider.print_label(fulfillment)
+		self.assertEqual(len(label_result["files"]), 1)
+		self.assertEqual(label_result["tracking_number"], "TRK9")
+		self.assertEqual(provider.labels(fulfillment), label_result["files"])
+		# opened again, the label is not bought again
+		self.assertEqual(provider.print_label(fulfillment)["files"], label_result["files"])
+		self.assertEqual(len(printed), 1)
