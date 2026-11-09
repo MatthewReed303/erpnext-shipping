@@ -31,6 +31,7 @@ RATE_CACHE_SECONDS = 15 * 60
 RATE_CACHE_PREFIX = "shipping_rates:"
 # statuses before the courier has the parcel: a printed label is not shipped yet
 NOT_YET_SHIPPED = {"", "unshipped", "saved", "new", "printed"}
+SENT_STATUSES = ("In Progress", "Delivered", "Returned", "Lost")
 
 
 # --- checkout rates ---------------------------------------------------------------
@@ -343,13 +344,16 @@ class ShippingFulfillment(FulfillmentProvider):
 	"""A store parcel becomes a draft Shipment, to book with any enabled shipping provider."""
 
 	key = "erpnext_shipping"
-	label = "ERPNext Shipping (Shipment)"
 	needs_ship_from = True
 	shipping_providers = None  # every provider of this app
 
 	def default_ship_from(self) -> str | None:
 		"""Starshipit's Ship From Address, which holds the store's shipping defaults."""
 		return settings().get("sender_address")
+
+	@property
+	def label(self) -> str:
+		return _("ERPNext Shipping (Shipment)")
 
 	def is_configured(self) -> bool:
 		return any(
@@ -408,6 +412,14 @@ class ShippingFulfillment(FulfillmentProvider):
 		name = fulfillment.external_id
 		if name and frappe.db.exists("Shipment", name):
 			doc = frappe.get_doc("Shipment", name)
+			if doc.docstatus == 1 and (doc.awb_number or doc.tracking_status in SENT_STATUSES):
+				frappe.throw(
+					_(
+						"Shipment {0} has a label or is with the courier, so it can't be cancelled from the store. "
+						"Cancel the consignment with the courier, then cancel the Shipment."
+					).format(frappe.bold(name)),
+					title=_("Parcel already sent"),
+				)
 			notes = [row.delivery_note for row in doc.shipment_delivery_note]
 			if doc.docstatus == 0:
 				doc.delete(ignore_permissions=True)
@@ -430,8 +442,11 @@ class StarshipitFulfillment(ShippingFulfillment):
 	"""The same with Starshipit rates only, for stores and fulfilments set up with it."""
 
 	key = "starshipit"
-	label = "Starshipit (Shipment)"
 	shipping_providers = (STARSHIPIT_PROVIDER,)
+
+	@property
+	def label(self) -> str:
+		return _("Starshipit (Shipment)")
 
 	def is_configured(self) -> bool:
 		s = settings()

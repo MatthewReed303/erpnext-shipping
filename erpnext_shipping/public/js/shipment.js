@@ -308,21 +308,29 @@ function show_pickup_dialog(frm) {
 		],
 		primary_action_label: __("Book Pickup"),
 		primary_action(values) {
-			frappe.call({
-				method: STARSHIPIT_METHOD + "book_pickup",
-				args: { shipment: frm.doc.name, ...values },
-				freeze: true,
-				freeze_message: __("Booking Pickup"),
-				callback: (r) => {
-					dialog.hide();
-					frappe.msgprint({
-						title: __("Pickup Booked"),
-						message: __("Job number: {0}", [r.message || "-"]),
-						indicator: "green",
-					});
-					frm.reload_doc();
-				},
-			});
+			const book = (book_again) =>
+				frappe.call({
+					method: STARSHIPIT_METHOD + "book_pickup",
+					args: { shipment: frm.doc.name, ...values, book_again },
+					freeze: true,
+					freeze_message: __("Booking Pickup"),
+					callback: (r) => {
+						const result = r.message || {};
+						if (result.confirm) {
+							frappe.confirm(result.confirm, () => book(1));
+							return;
+						}
+						dialog.hide();
+						frappe.msgprint({
+							title: __("Pickup Booked"),
+							message: __("Job number: {0}", [result.job_number || "-"]),
+							indicator: "green",
+						});
+						frm.reload_doc();
+					},
+					error: () => frm.reload_doc(),
+				});
+			book(0);
 		},
 	});
 	dialog.show();

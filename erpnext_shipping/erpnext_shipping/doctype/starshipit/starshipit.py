@@ -48,6 +48,7 @@ WEIGHT_DECIMALS = 3
 SERVICE_ID_SEPARATOR = "|"
 WEBHOOK_METHOD = "erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit.webhook"
 SIGNATURE_HEADER = "X-Starshipit-Signature"
+PICKUP_PENDING = "pending"
 
 # Order statuses without a label (Full Order Model status: Unshipped, Saved, Printed or Delivered)
 UNPRINTED_STATUSES = ("", "unshipped", "saved", "new")
@@ -79,6 +80,10 @@ class StarshipitError(frappe.ValidationError):
 
 class StarshipitNotFoundError(StarshipitError):
 	pass
+
+
+class StarshipitNoAnswerError(StarshipitError):
+	"""Starshipit did not answer, or failed on its side: the request may have been carried out."""
 
 
 class Starshipit(Document):
@@ -133,7 +138,7 @@ class StarshipitUtils:
 		if not self.api_key or not self.subscription_key:
 			frappe.throw(_("Set the Starshipit API Key and Subscription Key first."), title=_("Starshipit"))
 		for attempt in range(2):
-			wait_for_turn()
+			wait_for_turn(self.api_key, timeout)
 			try:
 				response = requests.request(
 					method,
@@ -151,7 +156,7 @@ class StarshipitUtils:
 				frappe.log_error(title=f"Starshipit {method} {path} did not answer")
 				frappe.throw(
 					_("Starshipit did not answer. Try again in a moment."),
-					StarshipitError,
+					StarshipitNoAnswerError,
 					title=_("Starshipit"),
 				)
 			if response.status_code != 429 or attempt or not retry:
@@ -183,7 +188,11 @@ class StarshipitUtils:
 				StarshipitError,
 				title=_("Starshipit"),
 			)
-		frappe.throw(self.format_errors(data, response), StarshipitError, title=_("Starshipit"))
+		frappe.throw(
+			self.format_errors(data, response),
+			StarshipitNoAnswerError if response.status_code >= 500 else StarshipitError,
+			title=_("Starshipit"),
+		)
 
 	@staticmethod
 	def format_errors(data, response) -> str:
@@ -227,7 +236,8 @@ class StarshipitUtils:
 			try:
 				data = self.request("POST", "/deliveryservices", payload=payload)
 			except frappe.ValidationError:
-				raise
+				# the error stays in the response's messages; other providers' rates still show
+				return []
 			except Exception:
 				show_error_alert("fetching Starshipit rates")
 				return []
@@ -567,14 +577,27 @@ class StarshipitUtils:
 # --- Helpers ------------------------------------------------------------------
 
 
-def wait_for_turn() -> None:
-	"""Keep to the API's request rate across every worker on the site: each request first takes a
-	slot in Redis that lasts the minimum interval, set only if no other request holds it."""
-	key = frappe.cache.make_key(PACING_KEY)
+def pacing_key(api_key: str | None) -> str:
+	"""The Redis key requests with these API keys take turns on, shared by every site using them."""
+	return f"{PACING_KEY}:{hashlib.sha256(cstr(api_key).encode()).hexdigest()[:16]}"
+
+
+def wait_for_turn(api_key: str | None = None, deadline: float = TIMEOUT) -> None:
+	"""Keep to the API's request rate across every worker: each request first takes a slot in Redis
+	that lasts the minimum interval, set only if no other request holds it. Gives up after the
+	deadline (in seconds) rather than wait behind a long queue."""
+	key = pacing_key(api_key)
 	interval = int(MIN_REQUEST_INTERVAL * 1000)
-	for _attempt in range(600):
+	give_up = time.monotonic() + deadline
+	while True:
 		if frappe.cache.set(key, 1, nx=True, px=interval):
 			return
+		if time.monotonic() >= give_up:
+			frappe.throw(
+				_("Starshipit is busy with other requests. Try again in a moment."),
+				StarshipitError,
+				title=_("Starshipit"),
+			)
 		time.sleep(max(cint(frappe.cache.pttl(key)), 10) / 1000)
 
 
@@ -777,13 +800,22 @@ def erpnext_tracking_status(status: str | None) -> str:
 	return "Delivered" if cstr(status).replace(" ", "").lower() in DELIVERED_STATUSES else "In Progress"
 
 
+def tracking_numbers(*values) -> list[str]:
+	"""Tracking numbers from comma-separated texts and lists, each once, in the order given."""
+	numbers = []
+	for value in values:
+		for number in value if isinstance(value, list | tuple) else cstr(value).split(","):
+			number = cstr(number).strip()
+			if number and number not in numbers:
+				numbers.append(number)
+	return numbers
+
+
 def status_dict(order: dict, tracking: dict | None = None) -> dict:
 	"""Shipment tracking fields from a Starshipit order (Full Order Model) and its tracking."""
 	tracking = tracking or {}
-	package_numbers = [
-		p.get("tracking_number") for p in order.get("packages") or [] if p.get("tracking_number")
-	]
-	tracking_number = tracking.get("tracking_number") or ", ".join(package_numbers)
+	package_numbers = [p.get("tracking_number") for p in order.get("packages") or []]
+	tracking_number = ", ".join(tracking_numbers(package_numbers, tracking.get("tracking_number")))
 	status = tracking.get("tracking_status") or order.get("status") or ""
 	if order.get("manifested") and cstr(status).lower() in ("printed", "saved"):
 		status = "Manifested"
@@ -843,9 +875,12 @@ def apply_status(shipment_name: str, data: dict):
 	) not in ("Delivered", "Returned"):
 		values.pop("tracking_status", None)
 		values.pop("tracking_status_info", None)
-	for field in ("awb_number", "tracking_url"):
-		if data.get(field):
-			values[field] = data[field]
+	if data.get("awb_number"):
+		# a parcel's number joins the Shipment's others, it never replaces them
+		stored = frappe.db.get_value("Shipment", shipment_name, "awb_number")
+		values["awb_number"] = ", ".join(tracking_numbers(stored, data["awb_number"]))
+	if data.get("tracking_url"):
+		values["tracking_url"] = data["tracking_url"]
 	if data.get("tracking_status") == "Delivered":
 		values["status"] = "Completed"
 	frappe.db.set_value("Shipment", shipment_name, values)
@@ -913,30 +948,49 @@ def book_pickup(
 	pickup_from: str | None = None,
 	pickup_to: str | None = None,
 	special_instructions: str | None = None,
-) -> str:
+	book_again: int = 0,
+) -> dict:
+	"""Book the courier's pickup for the Shipment. A booking for the same date is refused; one that
+	got no answer is only tried again once staff confirm it isn't in Starshipit."""
 	doc = get_starshipit_shipment(shipment)
-	# a double click or a retry after a timeout would book (and pay for) a second pickup
 	frappe.db.get_value("Shipment", doc.name, "name", for_update=True)
-	booked = frappe.db.get_value(
-		"Comment",
-		{
-			"reference_doctype": "Shipment",
-			"reference_name": doc.name,
-			"comment_type": "Info",
-			"content": ["like", "Pickup booked for %"],
-		},
-		"content",
-		order_by="creation desc",
-	)
-	if booked and frappe.format(pickup_date or doc.pickup_date, {"fieldtype": "Date"}) in booked:
-		frappe.throw(_("A pickup is already booked for this date: {0}").format(booked), title=_("Starshipit"))
+	date = getdate(pickup_date or doc.pickup_date)
+	booked_for, job = frappe.db.get_value("Shipment", doc.name, ["pickup_booked_for", "pickup_job_number"])
+	if booked_for and getdate(booked_for) == date:
+		if job != PICKUP_PENDING:
+			frappe.throw(
+				_("A pickup is already booked for {0}. Job number: {1}").format(
+					frappe.format(date, {"fieldtype": "Date"}), job or "-"
+				),
+				title=_("Starshipit"),
+			)
+		if not cint(book_again):
+			return {
+				"confirm": _(
+					"The last pickup booking for {0} got no answer from Starshipit, so it may be booked. "
+					"Check the pickups in Starshipit and book again only if it isn't there."
+				).format(frappe.format(date, {"fieldtype": "Date"}))
+			}
 	if pickup_date or pickup_from or pickup_to:
 		# pickup fields can be changed after submit; saving runs ERPNext's pickup time checks
 		doc.pickup_date = pickup_date or doc.pickup_date
 		doc.pickup_from = pickup_from or doc.pickup_from
 		doc.pickup_to = pickup_to or doc.pickup_to
 		doc.save()
-	job_number = StarshipitUtils().book_pickup(doc, special_instructions)
+	# kept even if the request fails without an answer, so a blind retry can't book a second pickup
+	frappe.db.set_value(
+		"Shipment", doc.name, {"pickup_booked_for": date, "pickup_job_number": PICKUP_PENDING}
+	)
+	frappe.db.commit()  # nosemgrep: the pending booking must outlast a failed request
+	try:
+		job_number = StarshipitUtils().book_pickup(doc, special_instructions)
+	except StarshipitNoAnswerError:
+		raise
+	except Exception:
+		frappe.db.set_value("Shipment", doc.name, {"pickup_booked_for": None, "pickup_job_number": None})
+		frappe.db.commit()  # nosemgrep: Starshipit refused the booking, so none is pending
+		raise
+	frappe.db.set_value("Shipment", doc.name, "pickup_job_number", job_number or "-")
 	doc.add_comment(
 		"Info",
 		_("Pickup booked for {0}, {1} to {2}. Job number: {3}").format(
@@ -946,7 +1000,7 @@ def book_pickup(
 			job_number or "-",
 		),
 	)
-	return job_number
+	return {"job_number": job_number}
 
 
 @frappe.whitelist()
@@ -968,20 +1022,26 @@ def cancel_shipment_order(doc, method=None):
 	if not frappe.db.get_single_value("Starshipit", "enabled"):
 		return
 	# Starshipit is asked first (a failure stops the cancel), and the order is removed only once the
-	# cancel is saved, so a cancel that is then rolled back (e.g. a store cancel failing later)
-	# leaves the Starshipit order as it was
+	# cancel is saved, so a cancel that is then rolled back leaves the Starshipit order as it was
 	utils = StarshipitUtils()
 	try:
 		order = utils.request(
 			"GET", "/orders", params={"order_id": cint(doc.shipment_id)}, log_errors=False
 		).get("order")
-	except frappe.ValidationError:
+	except StarshipitNotFoundError:
 		frappe.clear_messages()
 		order = None
 	if not order or order.get("archived"):
-		# gone already: removed in Starshipit, or by a cancel here that was then undone
 		return
-	printed = utils.already_printed(doc)
+	printed = utils.already_printed(doc, order)
+	if printed:
+		frappe.msgprint(
+			_(
+				"The label is printed, so the Starshipit order will be archived. Cancel the consignment with the courier if it won't be sent."
+			),
+			indicator="orange",
+			alert=True,
+		)
 	frappe.db.after_commit.add(lambda: remove_order(doc.name, doc.shipment_id, printed))
 
 
@@ -990,23 +1050,19 @@ def remove_order(shipment: str, order_id: str, printed: bool) -> None:
 	cancel is committed; a failure is noted on the Shipment for staff to remove it in Starshipit."""
 	try:
 		result = StarshipitUtils().cancel_order(order_id, printed=printed)
+		note = (
+			_("Starshipit order {0} archived.").format(order_id)
+			if result == "archived"
+			else _("Starshipit order {0} deleted.").format(order_id)
+		)
 	except Exception:
 		frappe.clear_messages()
 		frappe.log_error(title=f"Starshipit order of {shipment} not removed")
-		frappe.get_doc("Shipment", shipment).add_comment(
-			"Info",
-			_(
-				"The Shipment is cancelled but its Starshipit order couldn't be removed. Delete or archive it in Starshipit."
-			),
+		note = _(
+			"The Shipment is cancelled but its Starshipit order couldn't be removed. Delete or archive it in Starshipit."
 		)
-		frappe.db.commit()  # nosemgrep: runs after the cancel was committed
-		return
-	if result == "archived":
-		frappe.msgprint(
-			_("Starshipit order archived. Cancel the consignment with the courier if it won't be sent."),
-			indicator="orange",
-			alert=True,
-		)
+	frappe.get_doc("Shipment", shipment).add_comment("Info", note)
+	frappe.db.commit()  # nosemgrep: runs after the cancel was committed
 
 
 def valid_signature(raw_body: bytes, signature: str | None, secret: str) -> bool:
@@ -1025,6 +1081,8 @@ def webhook(token: str | None = None):
 	by the token in the webhook URL. Repeated or late events don't undo a delivery.
 	"""
 	settings = frappe.get_single("Starshipit")
+	if not settings.enabled:
+		return {"ok": True, "matched": False}
 	secret = settings.get_password("webhook_secret", raise_exception=False)
 	raw_body = frappe.request.get_data() if frappe.request else b""
 	if secret:
@@ -1055,6 +1113,12 @@ def webhook(token: str | None = None):
 		# an order from another channel on the same Starshipit account
 		return {"ok": True, "matched": False}
 
+	tracking_number = cstr(payload.get("tracking_number")).strip()
+	stored = tracking_numbers(frappe.db.get_value("Shipment", shipment, "awb_number"))
+	if tracking_number and stored and tracking_number not in stored:
+		# another order with the same number (another site or channel on the account)
+		return {"ok": True, "matched": False}
+
 	# events can arrive late or twice; one older than the last one handled is dropped
 	updated = cstr(payload.get("last_updated_date"))
 	key = f"starshipit:last_event:{shipment}"
@@ -1064,15 +1128,9 @@ def webhook(token: str | None = None):
 			return {"ok": True, "matched": True, "stale": True}
 		frappe.cache.set_value(key, updated, expires_in_sec=60 * 60 * 24 * 90)
 
-	tracking_number = cstr(payload.get("tracking_number"))
-	stored = cstr(frappe.db.get_value("Shipment", shipment, "awb_number"))
-	if tracking_number and stored and tracking_number not in [n.strip() for n in stored.split(",")]:
-		# another order with the same number (another site or channel on the account)
-		return {"ok": True, "matched": False}
-
 	status = payload.get("tracking_status")
 	data = {
-		"awb_number": cstr(payload.get("tracking_number")),
+		"awb_number": tracking_number,
 		"tracking_status": erpnext_tracking_status(status),
 		"tracking_status_info": normalize_status(status),
 	}

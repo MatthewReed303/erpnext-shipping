@@ -309,14 +309,15 @@ def print_shipping_label(shipment: str):
 		from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import (
 			attach_pdf,
 			refresh_status_quietly,
+			tracking_numbers,
 		)
 
-		labels, tracking_numbers = StarshipitUtils().print_label(shipment_doc)
+		labels, numbers = StarshipitUtils().print_label(shipment_doc)
 		shipping_label = [
 			attach_pdf(shipment, "label", content, i) for i, content in enumerate(labels, start=1)
 		]
-		if tracking_numbers and not shipment_doc.awb_number:
-			shipment_doc.db_set("awb_number", ", ".join(tracking_numbers))
+		if numbers:
+			shipment_doc.db_set("awb_number", ", ".join(tracking_numbers(shipment_doc.awb_number, numbers)))
 		# the label is bought: a failed status check after it mustn't undo its record
 		refresh_status_quietly(shipment)
 		for row in shipment_doc.shipment_delivery_note:

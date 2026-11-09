@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests import IntegrationTestCase, UnitTestCase
+from frappe.utils import getdate
 
 from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import (
 	STARSHIPIT_PROVIDER,
@@ -207,6 +208,10 @@ class TestStarshipit(IntegrationTestCase):
 		sleep = patch(MODULE + ".time.sleep")
 		sleep.start()
 		self.addCleanup(sleep.stop)
+		# requests in a test needn't wait their turn for the API's rate limit
+		pacing = patch(MODULE + ".MIN_REQUEST_INTERVAL", 0.001)
+		pacing.start()
+		self.addCleanup(pacing.stop)
 
 	def tearDown(self):
 		frappe.db.set_single_value("Starshipit", "enabled", 0)
@@ -303,8 +308,13 @@ class TestStarshipit(IntegrationTestCase):
 		request.return_value = response(
 			{"success": False, "errors": [{"message": "Invalid post code", "details": "8011x"}]}, status=400
 		)
+		frappe.clear_messages()
+		# Desk keeps the other providers' rates: Starshipit has none, and says why
+		self.assertEqual(StarshipitUtils().get_available_services(address(), address(), [{"weight": 1}]), [])
+		self.assertIn("Invalid post code", str(frappe.message_log))
+		frappe.clear_messages()
 		with self.assertRaises(frappe.ValidationError) as context:
-			StarshipitUtils().get_available_services(address(), address(), [{"weight": 1}])
+			StarshipitUtils().get_available_services(address(), address(), [{"weight": 1}], checkout=True)
 		self.assertIn("Invalid post code", str(context.exception))
 
 	@patch(REQUESTS)
@@ -663,16 +673,27 @@ class TestStarshipit(IntegrationTestCase):
 		self.assertEqual(calls(request), [("GET", "/orders")])
 
 		unshipped = {"order_id": 123, "status": "Unshipped"}
-		request.side_effect = [
-			response({"order": unshipped, "success": True}),
-			response({"order": unshipped, "success": True}),
-			response({"success": True}),
-		]
+		request.side_effect = [response({"order": unshipped, "success": True}), response({"success": True})]
 		cancel_shipment_order(shipment)
 		# nothing is removed until the cancel is committed
 		self.assertNotIn(("DELETE", "/orders/delete"), calls(request))
-		frappe.db.after_commit.run()
+		shipment.add_comment = MagicMock()
+		with patch("frappe.get_doc", return_value=shipment), patch("frappe.db.commit"):
+			frappe.db.after_commit.run()
 		self.assertEqual(calls(request)[-1], ("DELETE", "/orders/delete"))
+		self.assertIn("deleted", shipment.add_comment.call_args.args[1])
+
+	@patch(REQUESTS)
+	def test_a_cancel_stops_when_starshipit_does_not_answer(self, request):
+		import requests as http
+
+		from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import cancel_shipment_order
+
+		shipment = self.shipment(service_provider=STARSHIPIT_PROVIDER, shipment_id="123")
+		request.side_effect = http.Timeout()
+		with self.assertRaises(frappe.ValidationError):
+			cancel_shipment_order(shipment)
+		frappe.db.after_commit.reset()
 
 	@patch(REQUESTS)
 	def test_a_rolled_back_cancel_leaves_the_starshipit_order(self, request):
@@ -680,10 +701,7 @@ class TestStarshipit(IntegrationTestCase):
 
 		shipment = self.shipment(service_provider=STARSHIPIT_PROVIDER, shipment_id="123")
 		unshipped = {"order_id": 123, "status": "Unshipped"}
-		request.side_effect = [
-			response({"order": unshipped, "success": True}),
-			response({"order": unshipped, "success": True}),
-		]
+		request.side_effect = [response({"order": unshipped, "success": True})]
 		cancel_shipment_order(shipment)
 		frappe.db.after_commit.reset()  # what a rollback does
 		self.assertNotIn(("DELETE", "/orders/delete"), calls(request))
@@ -853,6 +871,9 @@ class TestStarshipitStore(IntegrationTestCase):
 		sleep = patch(MODULE + ".time.sleep")
 		sleep.start()
 		self.addCleanup(sleep.stop)
+		pacing = patch(MODULE + ".MIN_REQUEST_INTERVAL", 0.001)
+		pacing.start()
+		self.addCleanup(pacing.stop)
 
 	def tearDown(self):
 		frappe.db.set_single_value("Starshipit", {"enabled": 0, "shop_checkout_rates": 0})
@@ -1025,42 +1046,97 @@ class TestStarshipitStore(IntegrationTestCase):
 		self.assertNotIn("tracking_status", set_value.call_args.args[2])
 		self.assertEqual(update.call_args.kwargs["tracking_info"], stored)
 
+	@patch(MODULE + ".MIN_REQUEST_INTERVAL", 0.55)
 	def test_requests_take_turns_across_workers(self):
 		from erpnext_shipping.erpnext_shipping.doctype.starshipit import starshipit
 
-		key = frappe.cache.make_key(starshipit.PACING_KEY)
+		key = starshipit.pacing_key("test-key")
 		frappe.cache.delete(key)
-		starshipit.wait_for_turn()
+		starshipit.wait_for_turn("test-key")
 		# another worker's request holds the slot, read from Redis rather than this worker's memory
 		self.assertTrue(frappe.cache.pttl(key) > 0)
 		with patch("time.sleep") as sleep:
 			sleep.side_effect = lambda seconds: frappe.cache.delete(key)
-			starshipit.wait_for_turn()
+			starshipit.wait_for_turn("test-key")
 		sleep.assert_called_once()
 
-	def test_a_pickup_is_booked_once_a_day(self):
+	def test_a_request_gives_up_waiting_for_its_turn_at_the_deadline(self):
 		from erpnext_shipping.erpnext_shipping.doctype.starshipit import starshipit
 
-		shipment = frappe._dict(name="SHIP-TEST-1", pickup_date="2026-11-10")
-		booked = (
-			"Pickup booked for " + frappe.format("2026-11-10", {"fieldtype": "Date"}) + ", 08:00 to 12:00"
+		key = starshipit.pacing_key("test-key")
+		frappe.cache.set(key, 1, px=60000)
+		self.addCleanup(frappe.cache.delete, key)
+		with patch("time.sleep"), self.assertRaises(starshipit.StarshipitError):
+			starshipit.wait_for_turn("test-key", deadline=0)
+
+	def book(self, stored, book_again=0, error=None):
+		"""Book a pickup for 2026-11-10 with the Shipment's booking fields as stored; returns the
+		result (or raised error), whether Starshipit was asked and what was written."""
+		from erpnext_shipping.erpnext_shipping.doctype.starshipit import starshipit
+
+		shipment = frappe._dict(
+			name="SHIP-TEST-1", pickup_date="2026-11-10", pickup_from="08:00:00", pickup_to="12:00:00"
 		)
+		shipment.add_comment = MagicMock()
 		original_get_value = frappe.db.get_value
+
+		def get_value(doctype, name=None, fields=None, *args, **kwargs):
+			if doctype == "Shipment" and isinstance(fields, list):
+				return stored
+			if doctype == "Shipment":
+				return name
+			return original_get_value(doctype, name, fields, *args, **kwargs)
+
+		writes = []
 		with (
 			patch.object(starshipit, "get_starshipit_shipment", return_value=shipment),
-			patch(
-				"frappe.db.get_value",
-				side_effect=lambda doctype, *a, **k: (
-					booked
-					if doctype == "Comment"
-					else ("SHIP-TEST-1" if doctype == "Shipment" else original_get_value(doctype, *a, **k))
-				),
-			),
-			patch.object(starshipit.StarshipitUtils, "book_pickup") as book,
-			self.assertRaises(frappe.ValidationError),
+			patch("frappe.db.get_value", side_effect=get_value),
+			patch("frappe.db.set_value", side_effect=lambda *args: writes.append(args[2:])),
+			patch("frappe.db.commit"),
+			patch.object(starshipit.StarshipitUtils, "__init__", return_value=None),
+			patch.object(
+				starshipit.StarshipitUtils, "book_pickup", side_effect=error, return_value="J42"
+			) as book,
 		):
-			starshipit.book_pickup("SHIP-TEST-1")
-		book.assert_not_called()
+			try:
+				result = starshipit.book_pickup("SHIP-TEST-1", book_again=book_again)
+			except frappe.ValidationError as e:
+				result = e
+		return result, book.called, writes
+
+	def test_a_pickup_already_booked_for_the_date_is_not_booked_again(self):
+		result, asked, _writes = self.book(("2026-11-10", "J41"))
+		self.assertIsInstance(result, frappe.ValidationError)
+		self.assertFalse(asked)
+
+	def test_a_booking_that_got_no_answer_is_only_retried_once_confirmed(self):
+		from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import PICKUP_PENDING
+
+		result, asked, _writes = self.book(("2026-11-10", PICKUP_PENDING))
+		self.assertIn("confirm", result)
+		self.assertFalse(asked)
+		result, asked, writes = self.book(("2026-11-10", PICKUP_PENDING), book_again=1)
+		self.assertEqual(result, {"job_number": "J42"})
+		self.assertTrue(asked)
+		self.assertEqual(writes[-1], ("pickup_job_number", "J42"))
+
+	def test_a_booking_is_pending_until_starshipit_answers(self):
+		from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import (
+			PICKUP_PENDING,
+			StarshipitError,
+			StarshipitNoAnswerError,
+		)
+
+		result, asked, writes = self.book((None, None), error=StarshipitNoAnswerError("no answer"))
+		self.assertIsInstance(result, StarshipitNoAnswerError)
+		self.assertTrue(asked)
+		self.assertEqual(
+			writes, [({"pickup_booked_for": getdate("2026-11-10"), "pickup_job_number": PICKUP_PENDING},)]
+		)
+		# a booking Starshipit refused leaves nothing pending
+		result, asked, writes = self.book((None, None), error=StarshipitError("refused"))
+		self.assertIsInstance(result, StarshipitError)
+		self.assertEqual(writes[-1], ({"pickup_booked_for": None, "pickup_job_number": None},))
 
 	def test_store_fulfilment_follows_a_status_update_at_once(self):
 		if "shop" not in frappe.get_installed_apps():
