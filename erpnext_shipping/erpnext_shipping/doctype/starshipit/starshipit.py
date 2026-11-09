@@ -67,7 +67,7 @@ LOST_STATUSES = {"lost"}
 # a cancelled shipment is not on its way, so it gets no tracking_status (the detail stays in tracking_status_info)
 NOT_IN_TRANSIT_STATUSES = UNPRINTED_STATUSES + ("cancelled",)
 
-# IANA zone -> Windows zone id, which Book Pickup expects (pickup_timezone_id)
+# IANA zone -> Windows zone id, which Book Pickup takes as pickup_timezone_id (from CLDR's windowsZones)
 WINDOWS_TIMEZONES = {
 	"Pacific/Auckland": "New Zealand Standard Time",
 	"Pacific/Chatham": "Chatham Islands Standard Time",
@@ -75,10 +75,79 @@ WINDOWS_TIMEZONES = {
 	"Australia/Melbourne": "AUS Eastern Standard Time",
 	"Australia/Canberra": "AUS Eastern Standard Time",
 	"Australia/Brisbane": "E. Australia Standard Time",
+	"Australia/Lindeman": "E. Australia Standard Time",
 	"Australia/Adelaide": "Cen. Australia Standard Time",
+	"Australia/Broken_Hill": "Cen. Australia Standard Time",
 	"Australia/Darwin": "AUS Central Standard Time",
 	"Australia/Hobart": "Tasmania Standard Time",
 	"Australia/Perth": "W. Australia Standard Time",
+	"Australia/Eucla": "Aus Central W. Standard Time",
+	"Australia/Lord_Howe": "Lord Howe Standard Time",
+	"Pacific/Fiji": "Fiji Standard Time",
+	"Pacific/Honolulu": "Hawaiian Standard Time",
+	"America/Anchorage": "Alaskan Standard Time",
+	"America/Los_Angeles": "Pacific Standard Time",
+	"America/Vancouver": "Pacific Standard Time",
+	"America/Phoenix": "US Mountain Standard Time",
+	"America/Denver": "Mountain Standard Time",
+	"America/Edmonton": "Mountain Standard Time",
+	"America/Chicago": "Central Standard Time",
+	"America/Winnipeg": "Central Standard Time",
+	"America/Regina": "Canada Central Standard Time",
+	"America/Mexico_City": "Central Standard Time (Mexico)",
+	"America/New_York": "Eastern Standard Time",
+	"America/Toronto": "Eastern Standard Time",
+	"America/Halifax": "Atlantic Standard Time",
+	"America/St_Johns": "Newfoundland Standard Time",
+	"America/Sao_Paulo": "E. South America Standard Time",
+	"America/Argentina/Buenos_Aires": "Argentina Standard Time",
+	"America/Santiago": "Pacific SA Standard Time",
+	"America/Bogota": "SA Pacific Standard Time",
+	"Atlantic/Reykjavik": "Greenwich Standard Time",
+	"Europe/London": "GMT Standard Time",
+	"Europe/Dublin": "GMT Standard Time",
+	"Europe/Lisbon": "GMT Standard Time",
+	"Europe/Paris": "Romance Standard Time",
+	"Europe/Brussels": "Romance Standard Time",
+	"Europe/Madrid": "Romance Standard Time",
+	"Europe/Copenhagen": "Romance Standard Time",
+	"Europe/Berlin": "W. Europe Standard Time",
+	"Europe/Amsterdam": "W. Europe Standard Time",
+	"Europe/Rome": "W. Europe Standard Time",
+	"Europe/Vienna": "W. Europe Standard Time",
+	"Europe/Zurich": "W. Europe Standard Time",
+	"Europe/Stockholm": "W. Europe Standard Time",
+	"Europe/Oslo": "W. Europe Standard Time",
+	"Europe/Prague": "Central Europe Standard Time",
+	"Europe/Budapest": "Central Europe Standard Time",
+	"Europe/Warsaw": "Central European Standard Time",
+	"Europe/Athens": "GTB Standard Time",
+	"Europe/Bucharest": "GTB Standard Time",
+	"Europe/Helsinki": "FLE Standard Time",
+	"Europe/Kyiv": "FLE Standard Time",
+	"Europe/Istanbul": "Turkey Standard Time",
+	"Europe/Moscow": "Russian Standard Time",
+	"Africa/Johannesburg": "South Africa Standard Time",
+	"Africa/Cairo": "Egypt Standard Time",
+	"Africa/Lagos": "W. Central Africa Standard Time",
+	"Africa/Nairobi": "E. Africa Standard Time",
+	"Asia/Dubai": "Arabian Standard Time",
+	"Asia/Riyadh": "Arab Standard Time",
+	"Asia/Karachi": "Pakistan Standard Time",
+	"Asia/Kolkata": "India Standard Time",
+	"Asia/Dhaka": "Bangladesh Standard Time",
+	"Asia/Bangkok": "SE Asia Standard Time",
+	"Asia/Jakarta": "SE Asia Standard Time",
+	"Asia/Ho_Chi_Minh": "SE Asia Standard Time",
+	"Asia/Singapore": "Singapore Standard Time",
+	"Asia/Kuala_Lumpur": "Singapore Standard Time",
+	"Asia/Manila": "Singapore Standard Time",
+	"Asia/Hong_Kong": "China Standard Time",
+	"Asia/Shanghai": "China Standard Time",
+	"Asia/Taipei": "Taipei Standard Time",
+	"Asia/Seoul": "Korea Standard Time",
+	"Asia/Tokyo": "Tokyo Standard Time",
+	"UTC": "UTC",
 }
 
 
@@ -98,6 +167,11 @@ class Starshipit(Document):
 	def validate(self):
 		if not self.webhook_token:
 			self.webhook_token = secrets.token_urlsafe(24)
+		if self.get("pickup_time_zone"):
+			try:
+				ZoneInfo(self.pickup_time_zone)
+			except Exception:
+				frappe.throw(_("{0} is not a time zone").format(frappe.bold(self.pickup_time_zone)))
 
 	@property
 	def webhook_url(self):
@@ -528,7 +602,12 @@ class StarshipitUtils:
 		if cstr(order.get("status")).lower() in UNPRINTED_STATUSES:
 			frappe.throw(_("Print the label before booking a pickup."), title=_("Starshipit"))
 
-		zone = frappe.get_system_settings("time_zone") or "UTC"
+		zone = pickup_time_zone(
+			self.settings.get("pickup_time_zone"),
+			frappe.db.get_value("Address", shipment_doc.pickup_address_name, "country")
+			if shipment_doc.get("pickup_address_name")
+			else None,
+		)
 		packages = order.get("packages") or []
 		payload = {
 			"order_reference": shipment_doc.name,
@@ -751,6 +830,22 @@ def pickup_address_model(details: dict) -> dict:
 		"state": details.get("state") or "",
 		"country": details.get("country") or "",
 	}
+
+
+def pickup_time_zone(setting: str | None, country: str | None) -> str:
+	"""The time zone a pickup's times are in: the setting, else the system's when it is one of the
+	pickup country's, else the country's only one, else the system's."""
+	if setting:
+		return setting
+	system = frappe.get_system_settings("time_zone") or "UTC"
+	zones = [
+		z.strip()
+		for z in cstr(frappe.db.get_value("Country", country, "time_zones")).split("\n")
+		if z.strip()
+	]
+	if not zones or system in zones:
+		return system
+	return zones[0] if len(zones) == 1 else system
 
 
 def local_to_utc(date, time_value, zone: str) -> str:

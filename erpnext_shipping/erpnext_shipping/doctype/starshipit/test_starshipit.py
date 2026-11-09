@@ -658,6 +658,25 @@ class TestStarshipit(IntegrationTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			StarshipitUtils().book_pickup(shipment)
 
+	def test_pickup_times_are_in_the_pickup_places_time_zone(self):
+		from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import pickup_time_zone
+
+		original = frappe.get_system_settings
+		with patch(
+			"frappe.get_system_settings",
+			side_effect=lambda key=None: "Australia/Sydney" if key == "time_zone" else original(key),
+		):
+			# the setting first, then the system's zone when it is one of the country's
+			self.assertEqual(pickup_time_zone("Australia/Perth", "Australia"), "Australia/Perth")
+			self.assertEqual(pickup_time_zone(None, "Australia"), "Australia/Sydney")
+			# a country with one time zone: its own, whatever the system's
+			self.assertEqual(pickup_time_zone(None, "United Kingdom"), "Europe/London")
+			self.assertEqual(pickup_time_zone(None, None), "Australia/Sydney")
+		settings = frappe.get_single("Starshipit")
+		settings.pickup_time_zone = "Mars/Olympus"
+		with self.assertRaises(frappe.ValidationError):
+			settings.save()
+
 	@patch(REQUESTS)
 	def test_cancel_deletes_unprinted_and_archives_printed(self, request):
 		request.return_value = response({"success": True})

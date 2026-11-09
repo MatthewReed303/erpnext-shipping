@@ -14,6 +14,7 @@
   "signature_required",
   "labels_section",
   "allow_label_printing",
+  "pickup_time_zone",
   "store_section",
   "shop_checkout_rates",
   "rates_include_tax",
@@ -79,6 +80,12 @@
    "fieldname": "allow_label_printing",
    "fieldtype": "Check",
    "label": "Allow Label Printing"
+  },
+  {
+   "description": "The time zone pickup times are booked in, as a zone name such as Australia/Perth. Empty for the pickup address's country's, or the system's.",
+   "fieldname": "pickup_time_zone",
+   "fieldtype": "Data",
+   "label": "Pickup Time Zone"
   },
   {
    "collapsible": 1,
@@ -192,7 +199,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-11-09 22:00:00.000000",
+ "modified": "2026-11-09 22:30:00.000000",
  "modified_by": "Administrator",
  "module": "ERPNext Shipping",
  "name": "Starshipit",
