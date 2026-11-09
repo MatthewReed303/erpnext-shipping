@@ -4,7 +4,7 @@ A Shipping Integration for ERPNext with various platforms. Platforms integrated 
 
 - [LetMeShip](https://www.letmeship.com/en/)
 - [SendCloud](https://www.sendcloud.com/home-new/)
-- [Starshipit](https://www.starshipit.com/) (NZ Post, CourierPost, Aramex, Australia Post, DHL and the other couriers on your Starshipit account)
+- [Starshipit](https://www.starshipit.com/) (Aramex, Australia Post, DHL, NZ Post and the other couriers on your Starshipit account)
 
 > [!TIP]
 > Please make sure to get your API access enabled first, by contacting the LetMeShip support.
