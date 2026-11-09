@@ -327,21 +327,57 @@ class TestCheckoutRates(StoreTestCase):
 	def test_a_couriers_breakdown_says_whether_its_price_includes_tax(self):
 		from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import breakdown_includes_tax
 
-		# as NZ Post (eShip) answers: domestic prices say they include GST; international say nothing
+		# a courier that says its price includes tax, and one that says nothing
 		self.assertTrue(breakdown_includes_tax({"Total (incl) GST": "8.86", "Service Code": "CPOLTPA4"}))
 		self.assertIsNone(breakdown_includes_tax({"Service Code": "ICOU"}))
 		self.assertIsNone(breakdown_includes_tax(None))
-		# a carrier that lists the GST: none charged, nothing to take off
-		self.assertIsNone(
+		# a courier that lists the tax: none charged means the price has none
+		self.assertIs(
 			breakdown_includes_tax(
 				{"Calculated Price ex GST": "$14.80", "Calculated GST": "$0.00", "Calculated Price": "$14.80"}
-			)
+			),
+			False,
 		)
 		self.assertTrue(
 			breakdown_includes_tax(
 				{"Calculated Price ex GST": "$14.80", "Calculated GST": "$1.48", "Calculated Price": "$16.28"}
 			)
 		)
+		# amounts in any currency's writing
+		self.assertTrue(breakdown_includes_tax({"VAT": "1,00 €"}))
+		self.assertTrue(breakdown_includes_tax({"Calculated VAT": "£2.00"}))
+		self.assertIs(breakdown_includes_tax({"Tax": "0,00 kr"}), False)
+
+	def test_breakdown_amounts_in_any_currency(self):
+		from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import breakdown_amount
+
+		for text, amount in (
+			("$1,234.50", 1234.5),
+			("1.234,50 €", 1234.5),
+			("£2.00", 2),
+			("12,5", 12.5),
+			("1,000", 1000),
+		):
+			self.assertEqual(breakdown_amount(text), amount, text)
+
+	@patch(EXCHANGE_RATE, return_value=0.9)
+	def test_rates_in_another_currency_are_converted(self, _rate):
+		from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import StarshipitUtils
+
+		service = {"carrier": "Courier", "service_name": "Express", "service_code": "X", "total_price": 20}
+		# Starshipit names the currency, else the store's setting says it
+		self.assertEqual(si.amount_in(StarshipitUtils.service_dict(dict(service, currency="AUD")), "NZD"), 18)
+		self.assertEqual(si.amount_in(StarshipitUtils.service_dict(service, "AUD"), "NZD"), 18)
+		self.assertEqual(si.amount_in(StarshipitUtils.service_dict(service), "NZD"), 20)
+
+	def test_the_fixed_amount_is_added_for_each_parcel(self):
+		self.addCleanup(
+			frappe.db.set_single_value, "Starshipit", {"checkout_rate_percent": 0, "checkout_rate_fixed": 0}
+		)
+		self.offer("Starshipit", checkout_rate_fixed=2)
+		service = dict(STARSHIPIT_RATES["services"][0], service_id="CourierPost|CPOLP")
+		options = si.checkout_options("Starshipit", [service], None, parcel_count=3)
+		self.assertEqual(options[0]["amount"], 15.5)
 
 	@patch(
 		REQUEST,

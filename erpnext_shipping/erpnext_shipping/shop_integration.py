@@ -130,7 +130,9 @@ def checkout_rates(context) -> dict | None:
 		if services is None:
 			failed = True
 			continue
-		options += checkout_options(provider, services, context.get("currency"))
+		options += checkout_options(
+			provider, services, context.get("currency"), sum(cint(p.get("count")) or 1 for p in parcels)
+		)
 	if failed and not options:
 		return {
 			"options": [],
@@ -166,7 +168,9 @@ def provider_rates(provider: str, request: frappe._dict) -> list[dict] | None:
 	return services
 
 
-def checkout_options(provider: str, services: list[dict], currency: str | None) -> list[dict]:
+def checkout_options(
+	provider: str, services: list[dict], currency: str | None, parcel_count: int = 1
+) -> list[dict]:
 	s = frappe.get_cached_doc(provider)
 	allowed = allowed_services(s)
 	options = []
@@ -183,7 +187,8 @@ def checkout_options(provider: str, services: list[dict], currency: str | None) 
 		if amount > 0:
 			# what the courier's price leaves out and is invoiced later (fuel, rural delivery, fees)
 			amount = flt(
-				amount * (1 + flt(s.get("checkout_rate_percent")) / 100) + flt(s.get("checkout_rate_fixed")),
+				amount * (1 + flt(s.get("checkout_rate_percent")) / 100)
+				+ flt(s.get("checkout_rate_fixed")) * parcel_count,
 				2,
 			)
 		service_id = cstr(service.get("service_id") or service.get("id"))

@@ -17,6 +17,7 @@
   "store_section",
   "shop_checkout_rates",
   "rates_include_tax",
+  "rates_currency",
   "checkout_free_services",
   "checkout_rate_percent",
   "checkout_rate_fixed",
@@ -122,10 +123,18 @@
   },
   {
    "default": "0",
-   "description": "Tick if the rates Starshipit gives include tax (e.g. GST), as set in Starshipit for each courier (for NZ Post Domestic: Settings > Couriers > NZ Post Domestic > Advanced). A rate for a parcel sent abroad carries no tax: the store charges it in full.",
+   "description": "Tick if the rates Starshipit gives include tax (e.g. GST or VAT), as each courier is set up in Starshipit. A courier that says in its price breakdown whether tax is included is taken at its word. A rate for a parcel sent abroad carries no tax: the store charges it in full.",
    "fieldname": "rates_include_tax",
    "fieldtype": "Check",
    "label": "Rates Include Tax"
+  },
+  {
+   "depends_on": "shop_checkout_rates",
+   "description": "The currency Starshipit's rates are in when its answer doesn't say. Empty for the company's currency.",
+   "fieldname": "rates_currency",
+   "fieldtype": "Link",
+   "label": "Rates Currency",
+   "options": "Currency"
   },
   {
    "default": "0",
@@ -144,10 +153,10 @@
   },
   {
    "depends_on": "shop_checkout_rates",
-   "description": "Added to every rate at checkout, per parcel, in the store's currency (e.g. a rural delivery add-on, or fees invoiced later).",
+   "description": "Added to every rate at checkout for each parcel the rate is for, in the store's currency (e.g. a handling fee, or fees invoiced later).",
    "fieldname": "checkout_rate_fixed",
-   "fieldtype": "Float",
-   "label": "Add to Checkout Rates (per parcel)"
+   "fieldtype": "Currency",
+   "label": "Add to Checkout Rates (per Parcel)"
   },
   {
    "description": "Service codes to offer, one per line. Empty offers every service",
@@ -183,7 +192,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-11-09 19:00:00.000000",
+ "modified": "2026-11-09 22:00:00.000000",
  "modified_by": "Administrator",
  "module": "ERPNext Shipping",
  "name": "Starshipit",

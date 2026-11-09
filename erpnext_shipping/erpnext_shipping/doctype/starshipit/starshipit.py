@@ -2,7 +2,7 @@
 # For license information, please see license.txt
 """Starshipit integration.
 
-Starshipit connects to many couriers (NZ Post, CourierPost, Aramex, Australia Post, DHL,
+Starshipit connects to many couriers (Aramex, Australia Post, DHL, NZ Post, Royal Mail,
 ...). This provider follows Starshipit's documented "print outside Starshipit" workflow:
 
 1. quote every service on the account          POST /api/deliveryservices
@@ -240,11 +240,16 @@ class StarshipitUtils:
 			except Exception:
 				show_error_alert("fetching Starshipit rates")
 				return []
-		services = [self.service_dict(service) for service in data.get("services") or []]
+		services = [
+			self.service_dict(service, self.settings.get("rates_currency"))
+			for service in data.get("services") or []
+		]
 		return sorted((s for s in services if s.total_price is not None), key=lambda s: flt(s.total_price))
 
 	@staticmethod
-	def service_dict(service: dict):
+	def service_dict(service: dict, currency: str | None = None):
+		"""A Starshipit service as the app's providers give one; currency is what its price is in
+		when Starshipit doesn't say."""
 		return frappe._dict(
 			service_provider=STARSHIPIT_PROVIDER,
 			carrier=service.get("carrier_name") or service.get("carrier"),
@@ -255,6 +260,7 @@ class StarshipitUtils:
 				[cstr(service.get("carrier")), cstr(service.get("service_code"))]
 			),
 			total_price=service.get("total_price"),
+			currency=service.get("currency") or currency,
 			tax_included=breakdown_includes_tax(service.get("pricing_breakdown")),
 		)
 
@@ -467,7 +473,10 @@ class StarshipitUtils:
 			"/deliveryservices",
 			payload={"order_id": cint(shipment_doc.shipment_id), "include_pricing": False},
 		)
-		services = [self.service_dict(service) for service in data.get("services") or []]
+		services = [
+			self.service_dict(service, self.settings.get("rates_currency"))
+			for service in data.get("services") or []
+		]
 		chosen = [s for s in services if s.service_name == shipment_doc.carrier_service]
 		if not chosen and len(services) == 1:
 			chosen = services
@@ -646,19 +655,33 @@ def shipment_currency(shipment_doc) -> str | None:
 
 
 def breakdown_includes_tax(breakdown) -> bool | None:
-	"""Whether a service's price includes tax, when its courier says so in the price breakdown
-	(e.g. NZ Post's "Total (incl) GST", or a GST amount); None when it doesn't say."""
+	"""Whether a service's price includes tax, when its courier says so in the price breakdown (e.g.
+	"Total (incl) GST", or a tax amount); None when it doesn't say."""
 	if not isinstance(breakdown, dict):
 		return None
+	result = None
 	for key, value in breakdown.items():
 		name = cstr(key).lower()
 		if "incl" in name and any(word in name for word in ("gst", "tax", "vat")):
 			return True
 		if name.replace("calculated", "").strip() in ("gst", "tax", "vat"):
-			amount = flt(cstr(value).replace("$", "").replace(",", "").strip() or 0)
-			if amount:
+			if breakdown_amount(value):
 				return True
-	return None
+			result = False
+	return result
+
+
+def breakdown_amount(value) -> float:
+	"""An amount as a price breakdown writes it, whatever the currency sign and separators:
+	"$1,234.50", "1.234,50 €", "£2.00"."""
+	text = re.sub(r"[^\d.,\-]", "", cstr(value))
+	if "," in text and "." in text:
+		decimal = "," if text.rfind(",") > text.rfind(".") else "."
+		text = text.replace("." if decimal == "," else ",", "").replace(",", ".")
+	elif "," in text:
+		whole, _sep, part = text.rpartition(",")
+		text = f"{whole.replace(',', '')}.{part}" if len(part) != 3 else text.replace(",", "")
+	return flt(text)
 
 
 def rate_address(address) -> dict:
