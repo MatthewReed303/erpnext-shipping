@@ -156,15 +156,23 @@ def update_tracking_info_daily():
 
 
 def fill_parcels_from_items(doc, method=None):
-	"""Shipment before_validate: when a draft Shipment has no parcels, add them from its items.
-
-	Items marked "Ships in Own Box" get one parcel per unit in their own Parcel Template. All other
-	items share one parcel: the Shipment's Parcel Template, else the largest Parcel Template of those
-	items, else Starshipit's default. Parcel weight = items + box. Parcels can be edited by hand.
-	"""
+	"""Shipment before_validate: when a draft Shipment made from a store order, or one for
+	Starshipit, has no parcels, add them from its items (see parcels_for_items). Parcels can be
+	edited by hand; items that can't be weighed leave them for staff to enter."""
 	if doc.docstatus != 0 or doc.shipment_parcel or not doc.shipment_delivery_note:
 		return
-	from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import kg_per_unit
+	from erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit import (
+		STARSHIPIT_PROVIDER,
+		kg_per_unit,
+	)
+
+	starshipit = frappe.db.get_single_value("Starshipit", "enabled") and doc.service_provider in (
+		None,
+		"",
+		STARSHIPIT_PROVIDER,
+	)
+	if not (doc.flags.fill_parcels_from_items or starshipit):
+		return
 
 	lines = []
 	for row in doc.shipment_delivery_note:
@@ -187,12 +195,21 @@ def fill_parcels_from_items(doc, method=None):
 				)
 			)
 	default = frappe.db.get_single_value("Starshipit", "default_parcel_template")
-	for parcel in parcels_for_items(lines, doc.parcel_template, default):
+	try:
+		parcels = parcels_for_items(lines, doc.parcel_template, default)
+	except frappe.ValidationError:
+		frappe.clear_messages()
+		return
+	for parcel in parcels:
 		doc.append("shipment_parcel", parcel)
 
 
 def parcels_for_items(lines: list[dict], shipment_template: str | None, default_template: str | None):
-	"""Parcels (cm, kg) for item lines of {qty, kg per unit, template, own_box}."""
+	"""Parcels (cm, kg) for item lines of {qty, kg per unit, template, own_box}.
+
+	Items marked "Ships in Own Box" get one parcel per unit in their own Parcel Template. The others
+	share the Shipment's Parcel Template, else the largest of those items', else the default; as
+	many of it as their weight needs when it has a Maximum Weight. Parcel weight = items + box."""
 
 	def box(name):
 		return frappe.get_cached_doc("Shipment Parcel Template", name) if name else None
@@ -206,7 +223,7 @@ def parcels_for_items(lines: list[dict], shipment_template: str | None, default_
 			"count": count,
 		}
 
-	parcels, shared_kg, shared_boxes = [], 0.0, []
+	parcels, shared, shared_boxes = [], [], []
 	for line in lines:
 		line = frappe._dict(line)
 		if line.own_box:
@@ -214,16 +231,46 @@ def parcels_for_items(lines: list[dict], shipment_template: str | None, default_
 			own = parcel(template, flt(line.kg), max(ceil(flt(line.qty)), 1))
 			if own["weight"] <= 0:
 				frappe.throw(
-					_("Set a weight for {0}, or for its Parcel Template, so its parcels can be priced.").format(
-						frappe.bold(line.get("item_code") or _("an item shipped in its own box"))
-					)
+					_(
+						"Set a weight for {0}, or for its Parcel Template, so its parcels can be priced."
+					).format(frappe.bold(line.get("item_code") or _("an item shipped in its own box")))
 				)
 			parcels.append(own)
 			continue
-		shared_kg += flt(line.kg) * flt(line.qty)
+		if flt(line.kg) * flt(line.qty) > 0:
+			shared.append(line)
 		if line.template:
 			shared_boxes.append(box(line.template))
-	if shared_kg:
+	if shared:
 		largest = max(shared_boxes, key=lambda b: flt(b.length) * flt(b.width) * flt(b.height), default=None)
-		parcels.insert(0, parcel(box(shipment_template) or largest or box(default_template), shared_kg))
+		template = box(shipment_template) or largest or box(default_template)
+		capacity = flt(template.get("max_weight")) - flt(template.weight) if template else 0
+		loads = (
+			pack(shared, capacity) if capacity > 0 else [sum(flt(line.kg) * flt(line.qty) for line in shared)]
+		)
+		counted = {}
+		for load in loads:
+			weight = flt(load, 3)
+			counted[weight] = counted.get(weight, 0) + 1
+		parcels[:0] = [parcel(template, weight, count) for weight, count in counted.items()]
 	return parcels
+
+
+def pack(lines: list[dict], capacity: float) -> list[float]:
+	"""Item weights (kg) packed into boxes holding up to capacity each, heaviest first; a unit
+	heavier than a box goes in one on its own."""
+	units = []
+	for line in lines:
+		whole = int(flt(line.qty))
+		units += [flt(line.kg)] * whole
+		if flt(line.qty) > whole:
+			units.append(flt(line.kg) * (flt(line.qty) - whole))
+	loads = []
+	for weight in sorted(units, reverse=True):
+		for index, load in enumerate(loads):
+			if load + weight <= capacity:
+				loads[index] = load + weight
+				break
+		else:
+			loads.append(weight)
+	return loads

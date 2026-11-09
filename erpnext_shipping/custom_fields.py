@@ -30,6 +30,17 @@ def get_custom_fields():
 				"insert_after": "ships_in_own_box",
 			},
 		],
+		"Shipment Parcel Template": [
+			{
+				"fieldname": "max_weight",
+				"label": _("Maximum Weight (kg)"),
+				"fieldtype": "Float",
+				"description": _(
+					"The most a box of this kind may weigh, the box included. Items that share boxes fill as many as they need. 0 for no limit"
+				),
+				"insert_after": "weight",
+			},
+		],
 		"Warehouse": [
 			{
 				"fieldname": "shipping_pickup_contact",

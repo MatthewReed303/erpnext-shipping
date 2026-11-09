@@ -80,7 +80,9 @@ def checkout_rates(context) -> dict | None:
 	if not lines:
 		return None  # nothing in the parcel is sent
 	try:
-		origin = origin_address(context.get("ship_from"))
+		origin = origin_address(
+			context.get("ship_from"), context.get("warehouse"), context.get("location_provider")
+		)
 	except frappe.ValidationError:
 		frappe.clear_messages()
 		frappe.log_error(
@@ -241,14 +243,36 @@ def service_codes(service: dict) -> set[str]:
 	return {cstr(service.get(field)) for field in ("service_code", "service_id", "id")} - {""}
 
 
-def origin_address(ship_from: str | None = None) -> frappe._dict | None:
-	"""Where a parcel leaves from: its store location's address, else Starshipit's Ship From Address."""
-	name = ship_from or settings().get("sender_address")
+def origin_name(
+	ship_from: str | None = None, warehouse: str | None = None, fulfillment_provider: str | None = None
+) -> str | None:
+	"""The Address a parcel leaves from: its store location's, else Starshipit's Ship From Address
+	when the parcel is sent with Starshipit or Starshipit is in use, else the warehouse's, else the
+	company's."""
+	if ship_from:
+		return ship_from
+	s = settings()
+	if s.get("sender_address") and (s.enabled or fulfillment_provider == StarshipitFulfillment.key):
+		return s.sender_address
+	from frappe.contacts.doctype.address.address import get_default_address
+
+	if warehouse and (name := get_default_address("Warehouse", warehouse)):
+		return name
+	company = (
+		warehouse and frappe.db.get_value("Warehouse", warehouse, "company")
+	) or frappe.db.get_single_value("Shop Settings", "company")
+	if not company:
+		return None
+	from erpnext.setup.doctype.company.company import get_default_company_address
+
+	return get_default_company_address(company)
+
+
+def origin_address(
+	ship_from: str | None = None, warehouse: str | None = None, fulfillment_provider: str | None = None
+) -> frappe._dict | None:
+	name = origin_name(ship_from, warehouse, fulfillment_provider)
 	return get_address(name) if name else None
-
-
-def sender_address() -> frappe._dict | None:
-	return origin_address()
 
 
 def destination_address(address) -> frappe._dict:
@@ -348,8 +372,8 @@ class ShippingFulfillment(FulfillmentProvider):
 	shipping_providers = None  # every provider of this app
 
 	def default_ship_from(self) -> str | None:
-		"""Starshipit's Ship From Address, which holds the store's shipping defaults."""
-		return settings().get("sender_address")
+		"""Where a location without its own Ship From Address sends from."""
+		return origin_name(fulfillment_provider=self.key)
 
 	@property
 	def label(self) -> str:
@@ -373,7 +397,7 @@ class ShippingFulfillment(FulfillmentProvider):
 		Shop may pass the Shop Fulfillment being sent; when it doesn't, it is the latest Pending one
 		of this provider for the order (and the items' warehouse)."""
 		fulfillment = fulfillment or pending_fulfillment(order.name, self.key, items)
-		shipment = create_shipment_for_order(order.name, items, fulfillment)
+		shipment = create_shipment_for_order(order.name, items, fulfillment, self.key)
 		return {
 			"status": "Accepted",
 			"external_id": shipment,
@@ -528,7 +552,12 @@ def return_note(delivery_note: str) -> str:
 	return returned.name
 
 
-def create_shipment_for_order(order_name: str, items: list[dict] | None = None, fulfillment=None) -> str:
+def create_shipment_for_order(
+	order_name: str,
+	items: list[dict] | None = None,
+	fulfillment=None,
+	fulfillment_provider: str | None = None,
+) -> str:
 	"""Deliver a store order, or one parcel of it, and make a draft Shipment for it. Returns the
 	Shipment name.
 
@@ -558,12 +587,13 @@ def create_shipment_for_order(order_name: str, items: list[dict] | None = None, 
 	pickup_user = pickup_contact_user(parcel.warehouse)
 	shipment = make_shipment(delivery_note)
 	shipment.pickup_from_type = "Company"
-	shipment.pickup_address_name = parcel.ship_from or settings().get("sender_address")
+	shipment.pickup_address_name = origin_name(parcel.ship_from, parcel.warehouse, fulfillment_provider)
 	shipment.pickup_contact_person = pickup_user
 	set_pickup_contact(shipment, pickup_user)
 	shipment.pickup_date = next_business_day()
 	shipment.description_of_content = content_description()
 	shipment.parcel_template = None
+	shipment.flags.fill_parcels_from_items = True
 	choice = chosen_service(parcel.shipping_option or order_shipping_option(order_name))
 	if choice:
 		shipment.preferred_service = json.dumps(choice)

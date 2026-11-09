@@ -437,7 +437,27 @@ class TestCheckoutRates(StoreTestCase):
 		self.offer("Starshipit")
 		frappe.db.set_single_value("Starshipit", "sender_address", None)
 		self.clear()
-		self.assertIsNone(si.checkout_rates(self.context()))
+		with (
+			patch("frappe.contacts.doctype.address.address.get_default_address", return_value=None),
+			patch("erpnext.setup.doctype.company.company.get_default_company_address", return_value=None),
+		):
+			self.assertIsNone(si.checkout_rates(self.context()))
+
+	def test_a_store_without_starshipit_sends_from_the_warehouse_or_company(self):
+		frappe.db.set_single_value("Starshipit", "enabled", 0)
+		self.clear()
+		with (
+			patch("frappe.contacts.doctype.address.address.get_default_address", return_value="WH-ADDR"),
+			patch(
+				"erpnext.setup.doctype.company.company.get_default_company_address", return_value="CO-ADDR"
+			),
+		):
+			self.assertEqual(si.origin_name(None, "_Test Store North - X"), "WH-ADDR")
+			self.assertEqual(si.origin_name(), "CO-ADDR")
+			self.assertEqual(si.ShippingFulfillment().default_ship_from(), "CO-ADDR")
+			# a parcel sent with Starshipit keeps Starshipit's Ship From Address
+			self.assertEqual(si.StarshipitFulfillment().default_ship_from(), self.sender)
+			self.assertEqual(si.origin_name("LOCATION-ADDR"), "LOCATION-ADDR")
 
 	@patch(REQUEST, return_value=response(STARSHIPIT_RATES))
 	def test_domestic_only_items_compare_with_the_parcels_origin(self, request):

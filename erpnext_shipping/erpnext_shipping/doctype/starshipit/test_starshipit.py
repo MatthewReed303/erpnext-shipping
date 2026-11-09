@@ -844,6 +844,43 @@ class TestStarshipit(IntegrationTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			parcels_for_items([{"item_code": "X", "qty": 1, "kg": 0, "own_box": 1}], None, None)
 
+	def test_shared_items_fill_as_many_boxes_as_their_weight_needs(self):
+		from erpnext_shipping.erpnext_shipping.utils import parcels_for_items
+
+		satchel = self.box("_Test Satchel 5kg", 30, 25, 10, 0.5)
+		frappe.db.set_value("Shipment Parcel Template", satchel, "max_weight", 5)
+		frappe.clear_document_cache("Shipment Parcel Template", satchel)
+		self.addCleanup(frappe.clear_document_cache, "Shipment Parcel Template", satchel)
+		# nine 2 kg units in boxes holding 4.5 kg of items: four boxes of two, one of one
+		self.assertEqual(
+			parcels_for_items([{"qty": 9, "kg": 2}], None, satchel),
+			[
+				{"length": 30, "width": 25, "height": 10, "weight": 4.5, "count": 4},
+				{"length": 30, "width": 25, "height": 10, "weight": 2.5, "count": 1},
+			],
+		)
+		# a unit heavier than the box allows still goes, on its own
+		self.assertEqual(parcels_for_items([{"qty": 1, "kg": 7}], None, satchel)[0]["weight"], 7.5)
+
+	def test_parcels_are_filled_only_for_store_or_starshipit_shipments(self):
+		from erpnext_shipping.erpnext_shipping.utils import fill_parcels_from_items
+
+		shipment = self.shipment(service_provider="LetMeShip")
+		shipment.append("shipment_delivery_note", {"delivery_note": "DN-TEST-1"})
+		with patch("frappe.get_all", return_value=[]) as get_all:
+			fill_parcels_from_items(shipment)
+		get_all.assert_not_called()
+		self.assertFalse(shipment.shipment_parcel)
+		# an item that can't be weighed leaves the parcels to staff instead of blocking the save
+		shipment.service_provider = STARSHIPIT_PROVIDER
+		unweighed = frappe._dict(item_code="X", stock_qty=1, weight_per_unit=0, weight_uom=None)
+		with (
+			patch("frappe.get_all", return_value=[unweighed]),
+			patch("frappe.get_cached_value", return_value=(None, 1)),
+		):
+			fill_parcels_from_items(shipment)
+		self.assertFalse(shipment.shipment_parcel)
+
 	def test_parcel_weight_keeps_grams(self):
 		self.assertEqual(frappe.get_meta("Shipment Parcel").get_field("weight").precision, "3")
 		column = frappe.db.sql("show columns from `tabShipment Parcel` like 'weight'")[0][1]
