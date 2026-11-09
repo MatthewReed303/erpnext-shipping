@@ -677,6 +677,39 @@ class TestStarshipit(IntegrationTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			settings.save()
 
+	def test_the_daily_tracking_update_carries_on_past_a_failing_shipment(self):
+		from erpnext_shipping.erpnext_shipping.utils import update_tracking_info_daily
+
+		shipments = [frappe._dict(name="SHIP-A"), frappe._dict(name="SHIP-B")]
+		docs = {
+			name: MagicMock(service_provider="Starshipit", shipment_id=name) for name in ("SHIP-A", "SHIP-B")
+		}
+		tracked = {
+			"awb_number": "T1",
+			"tracking_status": "In Progress",
+			"tracking_status_info": "",
+			"tracking_url": "",
+		}
+
+		def update_tracking(name, *args):
+			if name == "SHIP-A":
+				raise frappe.ValidationError("timed out")
+			return tracked
+
+		with (
+			patch("frappe.get_all", return_value=shipments),
+			patch("frappe.get_doc", side_effect=lambda doctype, name: docs[name]),
+			patch("erpnext_shipping.erpnext_shipping.shipping.update_tracking", side_effect=update_tracking),
+			patch("frappe.db.commit") as commit,
+			patch("frappe.db.rollback") as rollback,
+			patch("frappe.log_error") as log_error,
+		):
+			update_tracking_info_daily()
+		rollback.assert_called_once()
+		commit.assert_called_once()
+		log_error.assert_called_once()
+		docs["SHIP-B"].db_set.assert_any_call("awb_number", "T1")
+
 	@patch(REQUESTS)
 	def test_cancel_deletes_unprinted_and_archives_printed(self, request):
 		request.return_value = response({"success": True})
@@ -1255,12 +1288,20 @@ class TestStarshipitStore(IntegrationTestCase):
 				"service_name": "Courier",
 			},
 		]
+		choice = {"provider": STARSHIPIT_PROVIDER, "service_id": "CourierPost|CPOLE"}
 		with (
 			patch("frappe.db.exists", return_value=True),
-			patch("frappe.db.get_value", return_value=json.dumps({"service_id": "CourierPost|CPOLE"})),
+			patch("frappe.db.get_value", return_value=json.dumps(choice)),
 		):
 			marked = self.si.mark_preferred(services, "SHIP-X")
 		self.assertEqual([s.get("is_preferred") for s in marked], [None, 1])
+		# a choice that wasn't a provider's service (e.g. a flat rate) marks none
+		with (
+			patch("frappe.db.exists", return_value=True),
+			patch("frappe.db.get_value", return_value=json.dumps({"label": "Standard shipping"})),
+		):
+			marked = self.si.mark_preferred([dict(s, is_preferred=None) for s in services], "SHIP-X")
+		self.assertEqual([s.get("is_preferred") for s in marked], [None, None])
 
 
 class TestInstall(IntegrationTestCase):

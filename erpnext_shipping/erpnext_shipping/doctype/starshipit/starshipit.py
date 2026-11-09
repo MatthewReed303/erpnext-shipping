@@ -296,7 +296,6 @@ class StarshipitUtils:
 		delivery_address,
 		parcels: list[dict],
 		value_of_goods: float | None = None,
-		return_order: bool = False,
 		checkout: bool = False,
 	) -> list[dict]:
 		"""Rates for every courier service on the account, cheapest first. For checkout, a slow
@@ -307,7 +306,7 @@ class StarshipitUtils:
 			"packages": self.packages(parcels),
 			"declared_value": flt(value_of_goods),
 			"include_pricing": True,
-			"return_order": bool(return_order),
+			"return_order": False,
 			"signature_required": bool(self.settings.signature_required),
 		}
 		if checkout:

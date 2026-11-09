@@ -792,8 +792,9 @@ def mark_preferred(services: list[dict], shipment: str | None) -> list[dict]:
 		choice = json.loads(raw)
 	except ValueError:
 		return services
-	# choices saved before other providers quoted at checkout were Starshipit's
-	provider = choice.get("provider") or STARSHIPIT_PROVIDER
+	provider = choice.get("provider")
+	if not provider:
+		return services
 	service_id = cstr(choice.get("service_id"))
 	for service in services:
 		if service.get("service_provider") != provider:
