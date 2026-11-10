@@ -12,7 +12,8 @@ app_license = "MIT"
 
 # include js, css files in header of desk.html
 # app_include_css = "/assets/erpnext_shipping/css/erpnext_shipping.css"
-# app_include_js = "/assets/erpnext_shipping/js/erpnext_shipping.js"
+# Address Line 1 suggestions in every form and dialog
+app_include_js = "/assets/erpnext_shipping/js/address_lookup.js"
 
 # include js, css files in header of web template
 # web_include_css = "/assets/erpnext_shipping/css/erpnext_shipping.css"
@@ -138,6 +139,8 @@ doc_events = {
 
 # Shop app (online store): shipping rates at checkout, and store parcels as Shipments
 shop_shipping_rate_providers = ["erpnext_shipping.erpnext_shipping.shop_integration.checkout_rates"]
+# Shop's storefront address forms suggest addresses through erpnext_shipping.address_lookup
+shop_address_lookup = ["erpnext_shipping.erpnext_shipping.address_lookup"]
 shop_fulfillment_providers = {
 	"erpnext_shipping": "erpnext_shipping.erpnext_shipping.shop_integration.ShippingFulfillment",
 	"starshipit": "erpnext_shipping.erpnext_shipping.shop_integration.StarshipitFulfillment",
