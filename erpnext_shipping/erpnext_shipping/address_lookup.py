@@ -128,7 +128,7 @@ def photon_address(place: dict) -> dict | None:
 	city = place.get("city") or place.get("town") or place.get("village") or place.get("county")
 	suburb = place.get("district") or place.get("locality")
 	return {
-		"address_line1": " ".join(filter(None, [place.get("housenumber"), street])),
+		"address_line1": " ".join(part for part in [place.get("housenumber"), street] if part),
 		"address_line2": suburb if suburb and suburb != city else "",
 		"city": city or suburb or "",
 		"state": place.get("state") or "",
@@ -210,8 +210,9 @@ def google_address(components: list[dict]) -> dict:
 	unit, number, street = part("subpremise"), part("street_number"), part("route")
 	city = part("locality", "postal_town", "administrative_area_level_2")
 	suburb = part("sublocality_level_1", "sublocality", "neighborhood")
+	house = f"{unit}/{number}" if unit and number else number
 	return {
-		"address_line1": " ".join(filter(None, [f"{unit}/{number}" if unit and number else number, street])),
+		"address_line1": " ".join(p for p in [house, street] if p),
 		"address_line2": suburb if suburb != city else "",
 		"city": city,
 		"state": part("administrative_area_level_1"),
@@ -232,9 +233,8 @@ def country_name(code: str | None) -> str:
 
 
 def place_line(found: dict) -> str:
-	return ", ".join(
-		filter(None, [found["address_line2"], found["city"], found["pincode"], found["country"]])
-	)
+	parts = [found["address_line2"], found["city"], found["pincode"], found["country"]]
+	return ", ".join(part for part in parts if part)
 
 
 def cache_key(*parts) -> str:

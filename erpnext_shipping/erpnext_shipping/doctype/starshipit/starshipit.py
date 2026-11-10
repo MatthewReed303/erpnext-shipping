@@ -280,12 +280,11 @@ class StarshipitUtils:
 	def format_errors(data, response) -> str:
 		errors = (data or {}).get("errors") if isinstance(data, dict) else None
 		if errors:
-			return "<br>".join(
-				frappe.utils.escape_html(
-					": ".join(filter(None, [cstr(e.get("message")), cstr(e.get("details"))]))
-				)
-				for e in errors
-			)
+			lines = []
+			for e in errors:
+				parts = [cstr(e.get("message")), cstr(e.get("details"))]
+				lines.append(frappe.utils.escape_html(": ".join(part for part in parts if part)))
+			return "<br>".join(lines)
 		return _("Unexpected response from Starshipit (HTTP {0}).").format(response.status_code)
 
 	# --- Rates ----------------------------------------------------------------
@@ -685,6 +684,7 @@ def wait_for_turn(api_key: str | None = None, deadline: float = TIMEOUT) -> None
 	interval = int(MIN_REQUEST_INTERVAL * 1000)
 	give_up = time.monotonic() + deadline
 	while True:
+		# nosemgrep: frappe-semgrep-rules.rules.frappe-cache-breaks-multitenancy -- the rate limit is per API key, so sites sharing a key share its turns
 		if frappe.cache.set(key, 1, nx=True, px=interval):
 			return
 		if time.monotonic() >= give_up:
@@ -800,7 +800,7 @@ def own_order(shipment_doc, existing: dict, order: dict) -> bool:
 def party(address, contact, company_name: str | None = None) -> dict:
 	"""Sender Details / Destination Details model."""
 	contact = contact or frappe._dict()
-	name = " ".join(filter(None, [contact.get("first_name"), contact.get("last_name")]))
+	name = " ".join(part for part in [contact.get("first_name"), contact.get("last_name")] if part)
 	return {
 		"name": cstr(name or company_name or address.address_title)[:100],
 		"email": cstr(contact.get("email_id"))[:100],
@@ -1073,7 +1073,7 @@ def manifest_shipment(shipment: str) -> str | None:
 	return file_url
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def book_pickup(
 	shipment: str,
 	pickup_date: str | None = None,
@@ -1113,14 +1113,16 @@ def book_pickup(
 	frappe.db.set_value(
 		"Shipment", doc.name, {"pickup_booked_for": date, "pickup_job_number": PICKUP_PENDING}
 	)
-	frappe.db.commit()  # nosemgrep: the pending booking must outlast a failed request
+	# nosemgrep: frappe-semgrep-rules.rules.frappe-manual-commit -- the pending booking must outlast a failed request
+	frappe.db.commit()
 	try:
 		job_number = StarshipitUtils().book_pickup(doc, special_instructions)
 	except StarshipitNoAnswerError:
 		raise
 	except Exception:
 		frappe.db.set_value("Shipment", doc.name, {"pickup_booked_for": None, "pickup_job_number": None})
-		frappe.db.commit()  # nosemgrep: Starshipit refused the booking, so none is pending
+		# nosemgrep: frappe-semgrep-rules.rules.frappe-manual-commit -- Starshipit refused the booking, so none is pending
+		frappe.db.commit()
 		raise
 	frappe.db.set_value("Shipment", doc.name, "pickup_job_number", job_number or "-")
 	doc.add_comment(
@@ -1194,7 +1196,8 @@ def remove_order(shipment: str, order_id: str, printed: bool) -> None:
 			"The Shipment is cancelled but its Starshipit order couldn't be removed. Delete or archive it in Starshipit."
 		)
 	frappe.get_doc("Shipment", shipment).add_comment("Info", note)
-	frappe.db.commit()  # nosemgrep: runs after the cancel was committed
+	# nosemgrep: frappe-semgrep-rules.rules.frappe-manual-commit -- runs after the cancel was committed
+	frappe.db.commit()
 
 
 def valid_signature(raw_body: bytes, signature: str | None, secret: str) -> bool:
@@ -1205,6 +1208,7 @@ def valid_signature(raw_body: bytes, signature: str | None, secret: str) -> bool
 	return hmac.compare_digest(expected.lower(), cstr(signature).strip().lower())
 
 
+# nosemgrep: frappe-semgrep-rules.rules.security.guest-whitelisted-method -- Starshipit posts without signing in; the signature or URL token is checked
 @frappe.whitelist(allow_guest=True, methods=["POST"])
 def webhook(token: str | None = None):
 	"""Tracking update pushed by Starshipit.

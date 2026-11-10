@@ -23,17 +23,17 @@ from erpnext_shipping.erpnext_shipping.utils import (
 
 @frappe.whitelist()
 def fetch_shipping_rates(
-	pickup_from_type,
-	delivery_to_type,
-	pickup_address_name,
-	delivery_address_name,
-	parcels,
-	description_of_content,
-	pickup_date,
-	value_of_goods,
-	pickup_contact_name=None,
-	delivery_contact_name=None,
-	shipment=None,
+	pickup_from_type: str,
+	delivery_to_type: str,
+	pickup_address_name: str,
+	delivery_address_name: str,
+	parcels: str,
+	description_of_content: str,
+	pickup_date: str,
+	value_of_goods: float,
+	pickup_contact_name: str | None = None,
+	delivery_contact_name: str | None = None,
+	shipment: str | None = None,
 ):
 	# Return Shipping Rates for the various Shipping Providers
 	frappe.has_permission("Shipment", "create", throw=True)
@@ -210,21 +210,21 @@ def get_pickup_contact(pickup_from_type: str, pickup_contact_name: str, require_
 
 @frappe.whitelist()
 def create_shipment(
-	shipment,
-	pickup_from_type,
-	delivery_to_type,
-	pickup_address_name,
-	delivery_address_name,
-	shipment_parcel,
-	description_of_content,
-	pickup_date,
-	value_of_goods,
-	service_data,
-	shipment_notific_email=None,
-	tracking_notific_email=None,
-	pickup_contact_name=None,
-	delivery_contact_name=None,
-	delivery_notes=None,
+	shipment: str,
+	pickup_from_type: str,
+	delivery_to_type: str,
+	pickup_address_name: str,
+	delivery_address_name: str,
+	shipment_parcel: str,
+	description_of_content: str,
+	pickup_date: str,
+	value_of_goods: float,
+	service_data: str,
+	shipment_notific_email: str | None = None,
+	tracking_notific_email: str | None = None,
+	pickup_contact_name: str | None = None,
+	delivery_contact_name: str | None = None,
+	delivery_notes: str | list | None = None,
 ):
 	frappe.get_doc("Shipment", shipment).check_permission("write")
 	return book_shipment(
@@ -433,7 +433,9 @@ def attach_existing_file(file_url: str, doctype: str, name: str):
 
 
 @frappe.whitelist()
-def update_tracking(shipment, service_provider, shipment_id, delivery_notes=None):
+def update_tracking(
+	shipment: str, service_provider: str, shipment_id: str, delivery_notes: str | list | None = None
+):
 	frappe.get_doc("Shipment", shipment).check_permission("write")
 	if isinstance(delivery_notes, str):
 		delivery_notes = json.loads(delivery_notes)

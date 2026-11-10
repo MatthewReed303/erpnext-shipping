@@ -775,11 +775,11 @@ def set_pickup_contact(shipment, user: str | None) -> None:
 	if not contact:
 		return
 	lines = [
-		" ".join(filter(None, [contact.first_name, contact.last_name])),
+		" ".join(name for name in [contact.first_name, contact.last_name] if name),
 		contact.email,
 		contact.phone or contact.mobile_no,
 	]
-	shipment.pickup_contact = "<br>".join(filter(None, lines))
+	shipment.pickup_contact = "<br>".join(line for line in lines if line)
 	shipment.pickup_contact_email = contact.email
 
 

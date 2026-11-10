@@ -1210,6 +1210,7 @@ class TestStarshipitStore(IntegrationTestCase):
 		from erpnext_shipping.erpnext_shipping.doctype.starshipit import starshipit
 
 		key = starshipit.pacing_key("test-key")
+		# nosemgrep: frappe-semgrep-rules.rules.frappe-cache-breaks-multitenancy -- the pacing key is shared by sites
 		frappe.cache.set(key, 1, px=60000)
 		self.addCleanup(frappe.cache.delete, key)
 		with patch("time.sleep"), self.assertRaises(starshipit.StarshipitError):
