@@ -60,7 +60,10 @@ def details(id: str, session: str | None = None) -> dict:
 	key = cache_key("address", service.name, service.source, id)
 	found = frappe.cache.get_value(key)
 	if found is None:
-		found = service.address(id, session)
+		try:
+			found = service.address(id, session)
+		except requests.RequestException:
+			frappe.throw(_("The address couldn't be looked up just now. Please type it in."))
 		frappe.cache.set_value(key, found, expires_in_sec=CACHE_SECONDS)
 	return found
 
@@ -81,7 +84,7 @@ def active_service():
 		return Photon(settings.photon_server or PHOTON_SERVER)
 	if settings.service == "Google Places":
 		api_key = settings.get_password("google_api_key", raise_exception=False)
-		return GooglePlaces(api_key) if api_key else None
+		return GooglePlaces(api_key, settings.daily_limit) if api_key else None
 	return None
 
 
@@ -140,8 +143,20 @@ class GooglePlaces:
 
 	source = GOOGLE_PLACES
 
-	def __init__(self, api_key: str):
+	def __init__(self, api_key: str, daily_limit: int = 0):
 		self.api_key = api_key
+		self.daily_limit = daily_limit
+
+	def spend(self) -> None:
+		"""Count a paid request; past the day's limit no more are sent."""
+		if not self.daily_limit:
+			return
+		key = frappe.cache.make_key(f"address_lookup:google:{frappe.utils.nowdate()}")
+		count = frappe.cache.incrby(key, 1)
+		if count == 1:
+			frappe.cache.expire(key, 2 * 24 * 60 * 60)
+		if count > self.daily_limit:
+			raise requests.RequestException("Address lookup's daily limit is reached")
 
 	def suggest(self, text: str, code: str | None, session: str | None) -> list[dict]:
 		body = {"input": text, "includedPrimaryTypes": ["street_address", "premise", "subpremise", "route"]}
@@ -149,6 +164,7 @@ class GooglePlaces:
 			body["includedRegionCodes"] = [code.lower()]
 		if session:
 			body["sessionToken"] = session
+		self.spend()
 		response = requests.post(
 			f"{GOOGLE_PLACES}/places:autocomplete",
 			json=body,
@@ -172,6 +188,7 @@ class GooglePlaces:
 		return suggestions[:LIMIT]
 
 	def address(self, id: str, session: str | None) -> dict:
+		self.spend()
 		response = requests.get(
 			f"{GOOGLE_PLACES}/places/{requests.utils.quote(id, safe='')}",
 			params={"sessionToken": session} if session else None,

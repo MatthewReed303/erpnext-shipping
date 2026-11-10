@@ -879,19 +879,25 @@ class TestStarshipit(IntegrationTestCase):
 		frappe.cache.delete_value("starshipit:last_event:SHIP-TEST-1")
 		token = frappe.db.get_single_value("Starshipit", "webhook_token")
 
-		def event(status, updated):
-			body = {"order_number": "SHIP-TEST-1", "tracking_status": status, "last_updated_date": updated}
+		def event(status, updated, stored="TRK1"):
+			body = {
+				"order_number": "SHIP-TEST-1",
+				"tracking_number": "TRK1",
+				"tracking_status": status,
+				"last_updated_date": updated,
+			}
 			self.webhook_request(json.dumps(body).encode(), {"token": token})
 			original_get_value = frappe.db.get_value
+
+			def get_value(doctype, *a, **k):
+				if doctype == "Shipment" and isinstance(a[0], dict):
+					return "SHIP-TEST-1"
+				if doctype == "Shipment" and a[:2] == ("SHIP-TEST-1", "awb_number"):
+					return stored
+				return original_get_value(doctype, *a, **k)
+
 			with (
-				patch(
-					"frappe.db.get_value",
-					side_effect=lambda doctype, *a, **k: (
-						"SHIP-TEST-1"
-						if doctype == "Shipment" and isinstance(a[0], dict)
-						else original_get_value(doctype, *a, **k)
-					),
-				),
+				patch("frappe.db.get_value", side_effect=get_value),
 				patch.object(starshipit, "apply_status") as apply,
 				patch("frappe.enqueue") as enqueue,
 			):
@@ -904,6 +910,13 @@ class TestStarshipit(IntegrationTestCase):
 		result, apply, _enqueue = event("Printed", "2026-11-09T08:00:00Z")
 		self.assertTrue(result.get("stale"))
 		apply.assert_not_called()
+
+		# before the Shipment has a tracking number, an event could be another site's order with the
+		# same number: the Shipment's own order is read instead
+		frappe.cache.delete_value("starshipit:last_event:SHIP-TEST-1")
+		result, apply, enqueue = event("Delivered", "2026-11-09T12:00:00Z", stored=None)
+		apply.assert_not_called()
+		self.assertTrue(enqueue.call_args.args[0].endswith("starshipit.refresh_status"))
 
 	def box(self, name, length, width, height, weight):
 		if not frappe.db.exists("Shipment Parcel Template", name):

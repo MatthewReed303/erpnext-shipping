@@ -436,7 +436,10 @@ class ShippingFulfillment(FulfillmentProvider):
 		name = fulfillment.external_id
 		if name and frappe.db.exists("Shipment", name):
 			doc = frappe.get_doc("Shipment", name)
-			if doc.docstatus == 1 and (doc.awb_number or doc.tracking_status in SENT_STATUSES):
+			# a label bought but not yet tracked is paid for: it isn't thrown away from the store
+			if doc.docstatus == 1 and (
+				doc.awb_number or doc.tracking_status in SENT_STATUSES or label_files(doc.name)
+			):
 				frappe.throw(
 					_(
 						"Shipment {0} has a label or is with the courier, so it can't be cancelled from the store. "

@@ -1250,6 +1250,17 @@ def webhook(token: str | None = None):
 	if tracking_number and stored and tracking_number not in stored:
 		# another order with the same number (another site or channel on the account)
 		return {"ok": True, "matched": False}
+	if not stored:
+		# nothing yet tells this Shipment's order from another site's with the same number: its own
+		# order is read from Starshipit by its id instead of trusting the event
+		frappe.enqueue(
+			"erpnext_shipping.erpnext_shipping.doctype.starshipit.starshipit.refresh_status",
+			shipment=shipment,
+			job_id=f"starshipit-status-{shipment}",
+			deduplicate=True,
+			enqueue_after_commit=True,
+		)
+		return {"ok": True, "matched": True}
 
 	# events can arrive late or twice; one older than the last one handled is dropped
 	updated = cstr(payload.get("last_updated_date"))

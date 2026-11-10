@@ -73,7 +73,9 @@ class TestAddressLookup(IntegrationTestCase):
 		frappe.cache.delete_keys("address_lookup:")
 
 	def restore(self, service, server):
-		frappe.db.set_single_value("Address Lookup Settings", {"service": service, "photon_server": server})
+		frappe.db.set_single_value(
+			"Address Lookup Settings", {"service": service, "photon_server": server, "daily_limit": 300}
+		)
 		frappe.clear_document_cache("Address Lookup Settings", "Address Lookup Settings")
 
 	def use(self, service, **values):
@@ -158,6 +160,15 @@ class TestAddressLookup(IntegrationTestCase):
 		)
 		self.assertEqual(get.call_args.kwargs["params"], {"sessionToken": "s2"})
 		self.assertEqual(get.call_args.kwargs["headers"]["X-Goog-FieldMask"], "addressComponents")
+
+	@patch("erpnext_shipping.erpnext_shipping.address_lookup.requests.post")
+	def test_google_stops_at_the_daily_limit(self, post):
+		self.use("Google Places", google_api_key="test-key", daily_limit=2)
+		frappe.cache.delete_value(f"address_lookup:google:{frappe.utils.nowdate()}")
+		post.return_value = answer(GOOGLE_SUGGESTIONS)
+		for text in ("45 Rata", "46 Rata", "47 Rata"):
+			address_lookup.suggestions(text, country="New Zealand")
+		self.assertEqual(post.call_count, 2)
 
 	def test_the_api_key_stays_on_the_server(self):
 		self.use("Google Places", google_api_key="secret-key")
