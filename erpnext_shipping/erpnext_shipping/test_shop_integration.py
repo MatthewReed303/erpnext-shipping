@@ -5,6 +5,7 @@
 All HTTP calls are mocked; nothing reaches Starshipit, LetMeShip or SendCloud."""
 
 import json
+import unittest
 from unittest.mock import MagicMock, patch
 
 import frappe
@@ -74,6 +75,12 @@ def starshipit_or_letmeship(method, url, **kwargs):
 
 
 class StoreTestCase(IntegrationTestCase):
+	@classmethod
+	def setUpClass(cls):
+		if "shop" not in frappe.get_installed_apps():
+			raise unittest.SkipTest("Shop is not installed")
+		super().setUpClass()
+
 	def setUp(self):
 		self.company = frappe.db.get_value("Company", {}, "name")
 		self.currency = frappe.get_cached_value("Company", self.company, "default_currency")

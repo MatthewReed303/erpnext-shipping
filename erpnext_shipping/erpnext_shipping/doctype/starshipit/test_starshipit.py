@@ -9,6 +9,7 @@ import base64
 import hashlib
 import hmac
 import json
+import unittest
 from unittest.mock import MagicMock, patch
 
 import frappe
@@ -1009,6 +1010,12 @@ class TestStarshipit(IntegrationTestCase):
 class TestStarshipitStore(IntegrationTestCase):
 	"""Starshipit for the Shop app: checkout rates and order status."""
 
+	@classmethod
+	def setUpClass(cls):
+		if "shop" not in frappe.get_installed_apps():
+			raise unittest.SkipTest("Shop is not installed")
+		super().setUpClass()
+
 	def setUp(self):
 		from erpnext_shipping.erpnext_shipping import shop_integration
 
@@ -1286,8 +1293,6 @@ class TestStarshipitStore(IntegrationTestCase):
 		self.assertEqual(writes[-1], ({"pickup_booked_for": None, "pickup_job_number": None},))
 
 	def test_store_fulfilment_follows_a_status_update_at_once(self):
-		if "shop" not in frappe.get_installed_apps():
-			self.skipTest("Shop is not installed")
 		with (
 			patch("frappe.get_all", return_value=["FUL-TEST-1"]) as get_all,
 			patch("shop.fulfillment.service.sync") as sync,
