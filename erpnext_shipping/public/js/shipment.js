@@ -242,19 +242,17 @@ function add_starshipit_buttons(frm) {
 	frm.add_custom_button(
 		__("Manifest"),
 		() =>
-			frappe.confirm(
-				__("Manifest this order? It is sent to the courier for billing."),
-				() =>
-					frappe.call({
-						method: STARSHIPIT_METHOD + "manifest_shipment",
-						args: { shipment: frm.doc.name },
-						freeze: true,
-						freeze_message: __("Manifesting"),
-						callback: (r) => {
-							if (r.message) window.open(r.message);
-							frm.reload_doc();
-						},
-					}),
+			frappe.confirm(__("Manifest this order? It is sent to the courier for billing."), () =>
+				frappe.call({
+					method: STARSHIPIT_METHOD + "manifest_shipment",
+					args: { shipment: frm.doc.name },
+					freeze: true,
+					freeze_message: __("Manifesting"),
+					callback: (r) => {
+						if (r.message) window.open(r.message);
+						frm.reload_doc();
+					},
+				}),
 			),
 		__("Starshipit"),
 	);

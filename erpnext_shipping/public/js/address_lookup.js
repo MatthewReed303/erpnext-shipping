@@ -41,7 +41,9 @@ function suggest_addresses(input) {
 		replace: () => {},
 		item: (item) =>
 			item.value.credit
-				? $(`<li aria-disabled="true" class="small text-muted">${frappe.utils.escape_html(item.label)}</li>`).get(0)
+				? $(
+						`<li aria-disabled="true" class="small text-muted">${frappe.utils.escape_html(item.label)}</li>`,
+				  ).get(0)
 				: $(`<li><div><strong>${frappe.utils.escape_html(item.label)}</strong>
 					<div class="small text-muted">${frappe.utils.escape_html(item.value.detail || "")}</div></div></li>`).get(0),
 		list: [],
@@ -90,7 +92,9 @@ function suggest_addresses(input) {
 		session = new_session();
 		const values = {};
 		const line2 = address.address_line2 && !target.has("address_line2");
-		values.address_line1 = line2 ? `${address.address_line1}, ${address.address_line2}` : address.address_line1;
+		values.address_line1 = line2
+			? `${address.address_line1}, ${address.address_line2}`
+			: address.address_line1;
 		for (const fieldname of ["address_line2", "city", "state", "pincode"]) {
 			if (target.has(fieldname) && address[fieldname]) values[fieldname] = address[fieldname];
 		}
